@@ -10,7 +10,7 @@ depends=('qemu-desktop' 'networkmanager' 'socat' 'tigervnc' 'python>=3.11')
 optdepends=('dnsmasq: only needed for legacy L2 bridge mode')
 source=()
 package() {
-  cd "$srcdir/.."
+  cd "$startdir/.."
   install -d "$pkgdir/usr/share/radmin-linux/vm"
   cp -r app shim agent "$pkgdir/usr/share/radmin-linux/"
   find "$pkgdir/usr/share/radmin-linux" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
