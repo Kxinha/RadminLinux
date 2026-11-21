@@ -80,7 +80,6 @@ fi
 need=()
 command -v qemu-system-x86_64 >/dev/null || need+=($PKG_QEMU)
 command -v qemu-img >/dev/null || need+=($PKG_IMG)
-command -v dnsmasq  >/dev/null || need+=($PKG_DNS)
 command -v nmcli    >/dev/null || need+=($PKG_NM)
 command -v socat    >/dev/null || need+=($PKG_SOCAT)
 command -v vncviewer >/dev/null || need+=($PKG_VNC)

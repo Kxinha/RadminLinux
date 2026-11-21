@@ -6,8 +6,8 @@ pkgdesc="Run Radmin VPN (Windows-only) on Linux via a headless VM"
 arch=('any')
 url="https://github.com/gabrielmf1998/Radmin-Linux-KDE"
 license=('MIT')
-depends=('qemu-desktop' 'dnsmasq' 'networkmanager' 'socat' 'python>=3.11')
-optdepends=('tigervnc: VM console for first-time network setup')
+depends=('qemu-desktop' 'networkmanager' 'socat' 'tigervnc' 'python>=3.11')
+optdepends=('dnsmasq: only needed for legacy L2 bridge mode')
 source=()
 package() {
   cd "$srcdir/.."
