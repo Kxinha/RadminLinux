@@ -71,12 +71,12 @@ case "$MODE" in
     sleep 3
     OUT="${RADMIN_DIST:-$SELF/dist}/radmin-linux-base.qcow2"
     mkdir -p "$(dirname "$OUT")"
-    say "Compressing the image (qemu-img -c) for distribution"
-    qemu-img convert -O qcow2 -c "$IMG" "$OUT" || die "failed to compress"
+    say "Compacting the image (qemu-img convert) for distribution"
+    qemu-img convert -O qcow2 "$IMG" "$OUT" || die "failed to convert"
     SZ=$(du -h "$OUT" | cut -f1)
     ok "clean base image: $OUT ($SZ)"
     if command -v zstd >/dev/null; then
-      zstd -q -T0 -19 --long=27 -f "$OUT" -o "$OUT.zst" && ok "compressed: $OUT.zst ($(du -h "$OUT.zst"|cut -f1))"
+      zstd -q -T0 -10 --long=27 -f "$OUT" -o "$OUT.zst" && ok "compressed: $OUT.zst ($(du -h "$OUT.zst"|cut -f1))"
       rm -f "$OUT.zst.part-"*
       split -b 1900M "$OUT.zst" "$OUT.zst.part-" && ok "split into <2 GB release parts: $(ls "$OUT.zst.part-"* | tr '\n' ' ')"
     fi

@@ -43,13 +43,16 @@ else
     get "$RADMIN_VM_URL" "$OUT" || OUT=""              # single-URL override
   else
     : > "$OUT"; ok=0
-    for suf in aa ab ac ad ae af ag ah; do            # concatenate the split parts
-      p="radmin-linux-base.qcow2.zst.part-$suf"
-      if get "$BASE_URL/$p" "$WORK/$p" 2>/dev/null; then
-        cat "$WORK/$p" >> "$OUT"; rm -f "$WORK/$p"; ok=1
-      else
-        break
-      fi
+    for base in "$BASE_URL" "https://github.com/$REPO/releases/download/v0.1.0"; do
+      for suf in aa ab ac ad ae af ag ah; do            # concatenate the split parts
+        p="radmin-linux-base.qcow2.zst.part-$suf"
+        if get "$base/$p" "$WORK/$p" 2>/dev/null; then
+          cat "$WORK/$p" >> "$OUT"; rm -f "$WORK/$p"; ok=1
+        else
+          break
+        fi
+      done
+      [[ $ok -eq 1 ]] && break
     done
     # fallback: a single, non-split asset (if it ever fits under 2 GB)
     [[ $ok -eq 0 ]] && { get "$BASE_URL/radmin-linux-base.qcow2.zst" "$OUT" || OUT=""; }
