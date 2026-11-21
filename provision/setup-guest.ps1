@@ -25,7 +25,10 @@ Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Syste
 Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0 -Type DWord
 Set-Service RemoteRegistry -StartupType Automatic; Start-Service RemoteRegistry
 netsh advfirewall set allprofiles state off
-Log "1. system opened (UAC off, RDP on, firewall off; MpsSvc kept)"
+# prevent local password expiration (Windows 7 defaults to 42 days, breaking AutoLogon & WMI)
+net accounts /maxpwage:unlimited | Out-Null
+wmic useraccount where "name='bench'" set PasswordExpires=FALSE 2>$null | Out-Null
+Log "1. system opened (UAC off, RDP on, firewall off; MpsSvc kept; password never expires)"
 
 # 2. silent Radmin VPN (/VERYSILENT - Inno Setup)
 $rad = "$PROV\Radmin_VPN.exe"

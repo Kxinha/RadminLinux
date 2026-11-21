@@ -52,6 +52,22 @@ $icsOk = ($radPub -and $isoPriv)
 $icsHealed=$false
 if(-not $icsOk -and $Heal -and $radName -and $isoName){
   Log "healing: reapply ICS"
+  Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\services\Tcpip\Parameters\Interfaces" -EA SilentlyContinue | ForEach-Object {
+    $p = Get-ItemProperty $_.PSPath -EA SilentlyContinue
+    if ($isoNic -and $_.PSChildName -ne $isoNic.GUID -and ($p.IPAddress -contains "192.168.137.1")) {
+      Set-ItemProperty $_.PSPath -Name EnableDHCP -Value 1 -Type DWord -EA SilentlyContinue
+      Set-ItemProperty $_.PSPath -Name IPAddress -Value @("0.0.0.0") -Type MultiString -EA SilentlyContinue
+      Set-ItemProperty $_.PSPath -Name SubnetMask -Value @("0.0.0.0") -Type MultiString -EA SilentlyContinue
+    }
+  }
+  $activeGuids = @(Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.NetConnectionID -and $_.GUID } | ForEach-Object { $_.GUID })
+  Get-WmiObject -Namespace root\Microsoft\HomeNet -Class HNet_ConnectionProperties -EA SilentlyContinue | ForEach-Object {
+    $g = if ($_.Connection -match '(\{[0-9A-Fa-f\-]+\})') { $matches[1] } else { "" }
+    if ($g -and ($activeGuids -notcontains $g)) { try { $_.Delete() } catch {} }
+  }
+  Get-WmiObject -Namespace root\Microsoft\HomeNet -Class HNet_Connection -EA SilentlyContinue | ForEach-Object {
+    if ($_.Guid -and ($activeGuids -notcontains $_.Guid)) { try { $_.Delete() } catch {} }
+  }
   foreach($c in $share.EnumEveryConnection){ $cfg=$share.INetSharingConfigurationForINetConnection($c); if($cfg.SharingEnabled){$cfg.DisableSharing()} }
   Start-Sleep 2
   foreach($c in $share.EnumEveryConnection){ $p=$share.NetConnectionProps($c); if($p.Name -eq $radName){ $share.INetSharingConfigurationForINetConnection($c).EnableSharing(0) } }
@@ -66,7 +82,16 @@ Check "ics" $icsOk "radPub=$radPub isoPriv=$isoPriv" $icsHealed
 $iso = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object { $_.MACAddress -eq "52:54:00:26:00:02" -and $_.IPAddress }
 $isoIp = $null
 if($iso){ $isoIp = $iso.IPAddress | Where-Object { $_ -like "192.168.137.*" } | Select-Object -First 1 }
-Check "isolated_ip" ([bool]$isoIp) $isoIp $false
+$isoHealed = $false
+if(-not $isoIp -and $Heal -and $isoName){
+  Log "healing: setting static 192.168.137.1 on $isoName"
+  netsh interface ip set address name="$isoName" static 192.168.137.1 255.255.255.0 | Out-Null
+  Start-Sleep 2
+  $iso = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object { $_.MACAddress -eq "52:54:00:26:00:02" -and $_.IPAddress }
+  if($iso){ $isoIp = $iso.IPAddress | Where-Object { $_ -like "192.168.137.*" } | Select-Object -First 1 }
+  $isoHealed = [bool]$isoIp
+}
+Check "isolated_ip" ([bool]$isoIp) $isoIp $isoHealed
 
 # --- 5. power locked (robust proxy: hibernation off = power-guard applied) ---
 $powerOk = -not (Test-Path "C:\hiberfil.sys")

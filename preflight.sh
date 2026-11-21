@@ -50,6 +50,11 @@ else
   sleep 2
   if ip link show "$TAP" >/dev/null 2>&1; then ok "$TAP up"; else err "could not create $TAP"; FAIL=1; fi
 fi
+if ! ip route show 26.0.0.0/8 2>/dev/null | grep -q "$TAP"; then
+  fix "adding static route 26.0.0.0/8 via $TARGET_HOST on $NMCON"
+  nmcli con mod "$NMCON" ipv4.routes "26.0.0.0/8 $TARGET_HOST" >/dev/null 2>&1 || true
+  nmcli con up "$NMCON" >/dev/null 2>&1 || true
+fi
 
 # 3. DHCP (only if the tap is in /8 mode, i.e. L2 bridge; in ICS the VM serves it) --
 step "3/7 tap DHCP"

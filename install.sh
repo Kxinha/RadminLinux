@@ -83,6 +83,7 @@ command -v qemu-img >/dev/null || need+=($PKG_IMG)
 command -v dnsmasq  >/dev/null || need+=($PKG_DNS)
 command -v nmcli    >/dev/null || need+=($PKG_NM)
 command -v socat    >/dev/null || need+=($PKG_SOCAT)
+command -v vncviewer >/dev/null || need+=($PKG_VNC)
 command -v python3  >/dev/null || need+=($PKG_PY)
 command -v uv       >/dev/null || warn "uv not found (will use python -m venv)"
 if [[ ${#need[@]} -gt 0 ]]; then
@@ -151,32 +152,21 @@ chmod +x "$VMDIR"/bench-*.sh
 cp "$SELF/env.sh" "$HOME_DIR/env.sh" 2>/dev/null || true
 
 # ---------- 6. isolated network + DHCP ----------
-say "6/8  Isolated interface + DHCP"
+say "6/8  Isolated interface + route (ICS/NAT)"
 if ! nmcli con show "$NMCON" >/dev/null 2>&1; then
+  nmcli con add type tun con-name "$NMCON" ifname "$TAP" mode tap owner "$(id -u)" \
+    ipv4.method manual ipv4.addresses "$TAP_IP" ipv4.routes "26.0.0.0/8 192.168.137.1" \
+    ipv4.never-default yes ipv6.method disabled \
+    connection.zone trusted connection.autoconnect yes >/dev/null 2>&1 || \
   pkexec nmcli con add type tun con-name "$NMCON" ifname "$TAP" mode tap owner "$(id -u)" \
-    ipv4.method manual ipv4.addresses "$TAP_IP" ipv4.never-default yes ipv6.method disabled \
+    ipv4.method manual ipv4.addresses "$TAP_IP" ipv4.routes "26.0.0.0/8 192.168.137.1" \
+    ipv4.never-default yes ipv6.method disabled \
     connection.zone trusted connection.autoconnect yes >/dev/null 2>&1
+else
+  nmcli con mod "$NMCON" ipv4.addresses "$TAP_IP" ipv4.routes "26.0.0.0/8 192.168.137.1" ipv4.never-default yes >/dev/null 2>&1 || true
 fi
-pkexec nmcli con up "$NMCON" >/dev/null 2>&1 || true
-ok "interface $TAP ($TAP_IP)"
-
-pkexec bash -c "cat > /etc/systemd/system/$DHCP_SVC <<UNIT
-[Unit]
-Description=DHCP on $TAP (Radmin-Linux)
-After=network.target
-[Service]
-ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --interface=$TAP --bind-dynamic \\
-  --except-interface=lo --no-resolv --no-hosts --port=0 \\
-  --dhcp-range=192.168.137.10,192.168.137.20,255.255.255.0,12h \\
-  --dhcp-option=3 --dhcp-option=6 --dhcp-authoritative --log-dhcp
-Restart=on-failure
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable --now $DHCP_SVC" 2>/dev/null || warn "DHCP via the VM's ICS (fine if you use ICS)"
-ok "DHCP configured"
+nmcli con up "$NMCON" >/dev/null 2>&1 || pkexec nmcli con up "$NMCON" >/dev/null 2>&1 || true
+ok "interface $TAP ($TAP_IP, route 26.0.0.0/8 -> 192.168.137.1)"
 
 # ---------- 7. config.env ----------
 say "7/8  Config"

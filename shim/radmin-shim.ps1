@@ -43,14 +43,24 @@ foreach ($line in $arp) {
   if (-not $inRadmin) { continue }
   if ($line -match "^\s*(26\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{17})\s+(\w+)") {
     $ip = $matches[1]; $mac = $matches[2]; $type = $matches[3]
-    if ($ip -eq "26.255.255.255") { continue }
+    if ($ip -eq "26.255.255.255" -or $ip -eq "26.0.0.1") { continue }
     if ($ip -eq $nodeIp) { continue }
-    # try the NetBIOS hostname (the peer machine's real name)
+    # try the NetBIOS hostname with a 1.2s cap so unreachable peers never stall the shim
     $hn = ""
-    $nb = (nbtstat -A $ip) 2>$null
-    foreach ($nl in $nb) {
-      if ($nl -match "^\s*(\S+)\s+<00>\s+UNIQUE") { $hn = $matches[1]; break }
-    }
+    try {
+      $psi = New-Object System.Diagnostics.ProcessStartInfo("nbtstat.exe", "-A $ip")
+      $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+      $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+      $proc = [System.Diagnostics.Process]::Start($psi)
+      if ($proc.WaitForExit(1200)) {
+        $nb = $proc.StandardOutput.ReadToEnd() -split "`r?`n"
+        foreach ($nl in $nb) {
+          if ($nl -match "^\s*(\S+)\s+<00>\s+UNIQUE") { $hn = $matches[1]; break }
+        }
+      } else {
+        try { $proc.Kill() } catch {}
+      }
+    } catch {}
     $peerJson += '{"ip":' + (JStr $ip) + ',"mac":' + (JStr $mac) + ',"type":' + (JStr $type) + ',"host":' + (JStr $hn) + '}'
   }
 }

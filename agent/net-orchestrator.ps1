@@ -70,7 +70,25 @@ if($radPub -and $isoPriv){
   Log "ICS already correct (Radmin=public, isolated=private)"
 } else {
   Log "reapplying ICS"
-  # clear any sharing first
+  # clear 192.168.137.1 from any ghost interfaces in Tcpip\Parameters\Interfaces (prevents 0x80040201)
+  Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\services\Tcpip\Parameters\Interfaces" -EA SilentlyContinue | ForEach-Object {
+    $p = Get-ItemProperty $_.PSPath -EA SilentlyContinue
+    if ($_.PSChildName -ne $iso.GUID -and ($p.IPAddress -contains "192.168.137.1")) {
+      Log "clearing ghost 192.168.137.1 from $($_.PSChildName)"
+      Set-ItemProperty $_.PSPath -Name EnableDHCP -Value 1 -Type DWord -EA SilentlyContinue
+      Set-ItemProperty $_.PSPath -Name IPAddress -Value @("0.0.0.0") -Type MultiString -EA SilentlyContinue
+      Set-ItemProperty $_.PSPath -Name SubnetMask -Value @("0.0.0.0") -Type MultiString -EA SilentlyContinue
+    }
+  }
+  # delete any ghost/unplugged HNet_ConnectionProperties & HNet_Connection in root\Microsoft\HomeNet (prevents 0x80040201)
+  $activeGuids = @(Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.NetConnectionID -and $_.GUID } | ForEach-Object { $_.GUID })
+  Get-WmiObject -Namespace root\Microsoft\HomeNet -Class HNet_ConnectionProperties -EA SilentlyContinue | ForEach-Object {
+    $g = if ($_.Connection -match '(\{[0-9A-Fa-f\-]+\})') { $matches[1] } else { "" }
+    if ($g -and ($activeGuids -notcontains $g)) { try { $_.Delete() } catch {} }
+  }
+  Get-WmiObject -Namespace root\Microsoft\HomeNet -Class HNet_Connection -EA SilentlyContinue | ForEach-Object {
+    if ($_.Guid -and ($activeGuids -notcontains $_.Guid)) { try { $_.Delete() } catch {} }
+  }
   foreach($c in $share.EnumEveryConnection){
     $cfg=$share.INetSharingConfigurationForINetConnection($c)
     if($cfg.SharingEnabled){ $cfg.DisableSharing() }
@@ -83,8 +101,15 @@ if($radPub -and $isoPriv){
   Log "ICS applied"
 }
 
-# 3. confirm the isolated adapter IP (ICS forces 192.168.137.1)
+# 3. confirm the isolated adapter IP (ICS forces 192.168.137.1; enforce static fallback if DHCP/APIPA lingered)
 $isoCfgW = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "Index=$($iso.Index)"
 $isoIp = $isoCfgW.IPAddress | Where-Object { $_ -like "192.168.137.*" }
+if(-not $isoIp){
+  Log "isolated adapter missing 192.168.137.1; setting static 192.168.137.1/24"
+  netsh interface ip set address name="$($iso.NetConnectionID)" static 192.168.137.1 255.255.255.0 | Out-Null
+  Start-Sleep 2
+  $isoCfgW = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "Index=$($iso.Index)"
+  $isoIp = $isoCfgW.IPAddress | Where-Object { $_ -like "192.168.137.*" }
+}
 Log "isolated adapter IP: $isoIp"
 if($isoIp){ Log "=== OK: connectivity ready ===" } else { Log "WARN: isolated adapter has no 192.168.137.x IP" }

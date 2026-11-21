@@ -33,5 +33,14 @@ Set-ItemProperty "HKCU:\Control Panel\Desktop" -Name ScreenSaveActive -Value 0 -
 # power button does not hibernate (in case of ACPI)
 powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 3 2>$null
 
-Log "power locked: no sleep/hibernate/monitor-off; WU manual"
+# prevent local password expiration (Windows 7 defaults to 42 days, breaking AutoLogon & WMI)
+net accounts /maxpwage:unlimited | Out-Null
+wmic useraccount where "name='bench'" set PasswordExpires=FALSE 2>$null | Out-Null
+
+# suppress Windows Activation nag dialogs at logon
+Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\Activation" -Name Manual -Value 1 -Type DWord -EA SilentlyContinue
+Set-Service sppuinotify -StartupType Disabled -EA SilentlyContinue
+Stop-Service sppuinotify -Force -EA SilentlyContinue
+
+Log "power locked: no sleep/hibernate/monitor-off; WU manual; password never expires"
 Log "=== OK ==="

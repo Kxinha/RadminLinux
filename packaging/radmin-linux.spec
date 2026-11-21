@@ -1,5 +1,5 @@
 Name:           radmin-linux
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Run Radmin VPN (Windows-only) on Linux via a headless VM
 

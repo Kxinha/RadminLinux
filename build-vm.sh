@@ -22,11 +22,20 @@ die(){ printf '   \033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 MODE="${1:-}"; shift || true
 
 clean_running_vm() {
+  # deploy the latest shim and agent scripts into the VM before freezing
+  say "Deploying latest shim and agent scripts into the VM"
+  "$SELF/deploy-shim.sh" >/dev/null && "$SELF/deploy-agent.sh" >/dev/null || die "failed to deploy shim/agent"
+
   # run the cleanup steps INSIDE the VM (powered on), via WMI
-  say "Cleaning the Radmin state in the VM (leaving the network, resetting identity)"
+  say "Cleaning the Radmin state in the VM (leaving the network, resetting identity, locking password)"
   local ps
   ps=$(cat <<'PSEOF'
 $ErrorActionPreference="SilentlyContinue"
+# 0. ensure password never expires and tasks/power-guard are up to date
+net accounts /maxpwage:unlimited | Out-Null
+wmic useraccount where "name='bench'" set PasswordExpires=FALSE 2>$null | Out-Null
+& powershell -ExecutionPolicy Bypass -File "C:\radmin-agent\agent-install.ps1" | Out-Null
+& powershell -ExecutionPolicy Bypass -File "C:\radmin-agent\power-guard.ps1" | Out-Null
 # 1. leave ALL networks (remove the associations)
 $net="HKLM:\SOFTWARE\Wow6432Node\Famatech\RadminVPN\1.0\Networks"
 if(Test-Path $net){ Get-ChildItem $net | ForEach-Object { Remove-Item $_.PSPath -Recurse -Force } }
@@ -45,7 +54,7 @@ PSEOF
   local b64; b64=$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)
   "$RADMIN_VENV/bin/python" "$RADMIN_VENV/bin/wmiexec.py" -shell-type powershell \
     "$RADMIN_TARGET" "powershell -EncodedCommand $b64" 2>&1 | grep -q CLEANOK \
-    && ok "network removed and identity reset" || die "failed to clean via WMI"
+    && ok "network removed, identity reset, and password locked" || die "failed to clean via WMI"
 }
 
 case "$MODE" in
@@ -67,7 +76,9 @@ case "$MODE" in
     SZ=$(du -h "$OUT" | cut -f1)
     ok "clean base image: $OUT ($SZ)"
     if command -v zstd >/dev/null; then
-      zstd -q -19 --long=27 -f "$OUT" -o "$OUT.zst" && ok "compressed: $OUT.zst ($(du -h "$OUT.zst"|cut -f1))"
+      zstd -q -T0 -19 --long=27 -f "$OUT" -o "$OUT.zst" && ok "compressed: $OUT.zst ($(du -h "$OUT.zst"|cut -f1))"
+      rm -f "$OUT.zst.part-"*
+      split -b 1900M "$OUT.zst" "$OUT.zst.part-" && ok "split into <2 GB release parts: $(ls "$OUT.zst.part-"* | tr '\n' ' ')"
     fi
     say "Ready to distribute. Install with: ./install.sh $OUT.zst"
     ;;
