@@ -59,7 +59,10 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.5.0**: the peer list is read from the real
+See [CHANGELOG.md](CHANGELOG.md). **0.5.1**: the list stays empty until the
+Radmin window has been read (no old peers or networks you left), and the VM
+closes the Windows activation dialog at logon, so Radmin is ready about 2
+minutes sooner. **0.5.0**: the peer list is read from the real
 Radmin window (network names, members, IPs) and online comes from Radmin
 itself, so the app shows exactly what Radmin shows, refreshed every 5 s.
 **0.4.0**: in-app updates, tray icon with

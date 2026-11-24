@@ -3,7 +3,7 @@
 # from the GitHub Release). Mirrors the .rpm layout. Needs: dpkg-deb.
 set -euo pipefail
 SELF="$(cd "$(dirname "$0")/.." && pwd)"
-VER="${VER:-0.5.0}"
+VER="${VER:-0.5.1}"
 OUT="${1:-$SELF/packaging/dist}"
 command -v dpkg-deb >/dev/null || { echo "need dpkg-deb (install dpkg)"; exit 1; }
 

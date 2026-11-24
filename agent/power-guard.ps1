@@ -37,7 +37,7 @@ powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 3 2>$null
 net accounts /maxpwage:unlimited | Out-Null
 wmic useraccount where "name='bench'" set PasswordExpires=FALSE 2>$null | Out-Null
 
-# suppress Windows Activation nag dialogs at logon
+# fewer Windows Activation nags (the logon dialog itself: logon-guard.ps1)
 Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\Activation" -Name Manual -Value 1 -Type DWord -EA SilentlyContinue
 Set-Service sppuinotify -StartupType Disabled -EA SilentlyContinue
 Stop-Service sppuinotify -Force -EA SilentlyContinue

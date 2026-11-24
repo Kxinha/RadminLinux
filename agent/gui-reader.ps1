@@ -112,6 +112,7 @@ function Read-Log {
 $script:mw = $null          # AutomationElement of CMainWnd
 $script:mwh = [IntPtr]::Zero
 $script:wokeAt = [DateTime]::MinValue
+$script:wokeByUs = $false
 $script:triedExpand = @{}
 
 function Find-Main {
@@ -126,20 +127,32 @@ function Find-Main {
 }
 
 # The window must exist and not be hidden in the tray. Started or woken by us
-# = minimized right away, so the VM screen stays quiet.
+# = minimized right away, so the VM screen stays quiet. Right after logon the
+# GUI may still be starting and ignore the wake: try again every 10 s, and
+# minimize it when it shows up late.
 function Ensure-Window {
-  if ($script:mwh -ne [IntPtr]::Zero -and [RlGr]::IsWindowVisible($script:mwh)) { return $true }
-  if ((Find-Main) -and [RlGr]::IsWindowVisible($script:mwh)) { return $true }
-  if (([DateTime]::UtcNow - $script:wokeAt).TotalSeconds -lt 60) { return $false }
+  $vis = ($script:mwh -ne [IntPtr]::Zero -and [RlGr]::IsWindowVisible($script:mwh))
+  if (-not $vis) { $vis = ((Find-Main) -and [RlGr]::IsWindowVisible($script:mwh)) }
+  if ($vis) {
+    if ($script:wokeByUs -and -not [RlGr]::IsIconic($script:mwh)) {
+      [void][RlGr]::ShowWindow($script:mwh, 7)     # SW_SHOWMINNOACTIVE
+      Start-Sleep -Milliseconds 300
+    }
+    $script:wokeByUs = $false
+    return $true
+  }
+  if (([DateTime]::UtcNow - $script:wokeAt).TotalSeconds -lt 10) { return $false }
   $script:wokeAt = [DateTime]::UtcNow
   if ((Get-Service RvControlSvc).Status -ne "Running") { return $false }
   # a second launch only wakes the running instance (single instance app)
   Start-Process $EXE
+  $script:wokeByUs = $true
   for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 500
     if ((Find-Main) -and [RlGr]::IsWindowVisible($script:mwh)) {
       [void][RlGr]::ShowWindow($script:mwh, 7)     # SW_SHOWMINNOACTIVE
       Start-Sleep -Milliseconds 300
+      $script:wokeByUs = $false
       return $true
     }
   }
@@ -194,8 +207,9 @@ function Read-Gui {
   return $ctx
 }
 
-# A collapsed network hides its members from the tree: expand it once (the user
-# can still collapse it again in the VNC window, we do not fight it).
+# Collapsed networks normally still list their members to UI Automation; if a
+# collapsed one (toggle Off) shows none, expand it once and look again. An
+# expanded network (On) is never touched, so an empty network stays as it is.
 function Expand-Collapsed($ctx) {
   $did = $false
   foreach ($n in $ctx.nets) {
@@ -203,12 +217,21 @@ function Expand-Collapsed($ctx) {
     $script:triedExpand[$n.name] = $true
     try {
       $tp = $n.toggle.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-      if ($tp) { $tp.Toggle(); $did = $true }
-    } catch {
-      try { $n.toggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); $did = $true } catch {}
-    }
+      if ($tp -and $tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::Off) { $tp.Toggle(); $did = $true }
+    } catch {}
   }
   return $did
+}
+
+# What the list looks like, to tell a settled window from one still loading.
+function Signature($ctx) {
+  $sb = New-Object System.Text.StringBuilder
+  foreach ($n in $ctx.nets) {
+    [void]$sb.Append("[" + $n.name + "]")
+    foreach ($m in $n.members) { [void]$sb.Append($m.name + "=" + $m.ip + ";") }
+  }
+  foreach ($t in $ctx.top) { [void]$sb.Append("|" + $t) }
+  return $sb.ToString()
 }
 
 function Build-Json($ctx, $ok, $err) {
@@ -245,6 +268,10 @@ function Build-Json($ctx, $ok, $err) {
 
 $last = ""; $lastWrite = [DateTime]::MinValue
 $tmp = "$OUT.tmp"
+# Only publish once the window has settled: right after it appears (boot,
+# wake, Radmin restart) it can still be filling in. The first reading must
+# repeat unchanged before the app sees it; after that changes go out at once.
+$settled = [bool]$Once; $prevSig = $null
 while ($true) {
   $t0 = [DateTime]::UtcNow
   Read-Log
@@ -253,10 +280,16 @@ while ($true) {
     try {
       $ctx = Read-Gui
       if (Expand-Collapsed $ctx) { Start-Sleep -Milliseconds 400; $ctx = Read-Gui }
-      $ok = $true
-    } catch { $err = "ui automation: " + $_.Exception.Message; $script:mwh = [IntPtr]::Zero }
+      $sig = Signature $ctx
+      if (-not $settled -and ($sig -ne $prevSig -or -not $ctx.top.Count)) {
+        $prevSig = $sig; $ctx = $null; $err = "reading the Radmin window"
+        Start-Sleep -Seconds 1; continue
+      } else {
+        $settled = $true; $prevSig = $sig; $ok = $true
+      }
+    } catch { $err = "ui automation: " + $_.Exception.Message; $script:mwh = [IntPtr]::Zero; $settled = $false; $prevSig = $null }
   } else {
-    $err = "Radmin window not available"
+    $err = "Radmin window not available"; $settled = $false; $prevSig = $null
   }
   $body = Build-Json $ctx $ok $err
   if ($Once) { Write-Output $body; if ($LogFile) { $Error | % { "ERR " + $_ } }; break }

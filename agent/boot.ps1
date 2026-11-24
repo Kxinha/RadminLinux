@@ -4,6 +4,8 @@
 #   2. harden.ps1            firewall + light services (idempotent)
 #   3. power-guard.ps1       never sleep / hibernate / reboot by itself
 #   4. net-orchestrator.ps1  wait for Radmin, apply ICS to the Linux link
+#  In parallel from the start: logon-guard.ps1 (closes the activation dialog
+#  that otherwise holds the desktop for 2 minutes at every logon)
 #  Log in C:\radmin-agent\boot.log
 # ============================================================
 $ErrorActionPreference = "SilentlyContinue"
@@ -17,6 +19,7 @@ function Step($f, $argv) {
 # keep the boot log small
 if ((Get-Item "$DIR\boot.log").Length -gt 200KB) { Remove-Item "$DIR\boot.log" -Force }
 Log "=== boot ==="
+Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File $DIR\logon-guard.ps1"
 Step "identity.ps1" @("-Check")
 Step "harden.ps1" @()
 Step "power-guard.ps1" @()

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.1 (2026-11-24)
+
+### The list only shows what Radmin shows
+* The app keeps the list empty ("reading the Radmin window…") until the VM
+  agent has a complete reading, instead of filling it with old peers, guessed
+  groups and networks you already left while Windows was still starting.
+* The reader publishes only after the Radmin window has settled (two equal
+  readings in a row), so a half loaded list never reaches the app.
+* The old list (ARP, ping, member sync, groups) is used only when the agent in
+  the VM is old and could not be updated; "Sync members" is hidden otherwise.
+* "Leave network" opens the Radmin window instead of guessing the network
+  from the registry, which still lists networks you left long ago.
+* Manual mode (auto refresh off) no longer shows the old peer list.
+
+### The VM gets to Radmin faster
+* At every logon Windows showed "Activate Windows now / The activation period
+  has expired" and held the desktop for about 2 minutes, so Radmin and the
+  reader started late, and the dialog stayed on screen. The agent (version 6,
+  new `logon-guard.ps1`) closes it after 3 s, the same as "Ask me later": the
+  taskbar is up 8 s after logon instead of 118 s. Registry switches do not
+  stop this dialog; an activation window opened by hand is left alone.
+* The reader wakes the Radmin window every 10 s while it is missing (was 60 s)
+  and minimizes it again even when it showed up late.
+* A network is expanded only when Radmin shows it collapsed and empty, once.
+
 ## 0.5.0 (2026-11-24)
 
 ### The list now matches the Radmin window

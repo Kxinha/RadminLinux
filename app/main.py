@@ -172,6 +172,14 @@ class DiscoverWorker(QThread):
         self.done.emit(discover.discover_peers())
 
 
+def _api_num(v) -> int:
+    """Agent API version as a number ("" or "?" = 0: WMI only or unknown)."""
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
 class NetHeader(QFrame):
     """Collapsible network-section header: click toggles, right-click manages."""
     def __init__(self, gid, name, count, collapsed, on_toggle, on_menu):
@@ -305,6 +313,14 @@ class MainWindow(QMainWindow):
         self._ping_online = set()   # answered the last ping sweep
         self._pinged = set()        # were in the last ping sweep (ping beats ARP)
         self._rtt = {}
+        # What the list shows:
+        #   "live"     the networks exactly as the Radmin window shows them (agent 5+)
+        #   "fallback" ARP + roster, only when the VM agent is old and could not be updated
+        #   None       nothing yet: the reading is not finished (no stale peers, no
+        #              old groups, no guessed networks on screen meanwhile)
+        self._mode = None
+        self._waiting = "reading the Radmin window"
+        self._agent_failed = False
         self._live = None          # networks as the Radmin window shows them (agent 5+)
         self._live_online = set()  # members Radmin is connected to (service.log)
         self._live_via = {}        # ip -> UDP / TCP / TcpRelay
@@ -317,6 +333,8 @@ class MainWindow(QMainWindow):
         self._upd = None
         self._update_offer = None
         self._build()
+        self.actSync.setVisible(False)          # only for old agents (fallback)
+        self.addNetBtn.setToolTip("Join or create a Radmin network")
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.pingtimer = QTimer(self)
@@ -390,8 +408,9 @@ class MainWindow(QMainWindow):
         self.power.setPixmap(icons.power_pixmap(running, 48))
         self._sync_actions(False)
         self._update_tray()
-        # show the known peers (as offline) so you can organize them into networks
-        # without querying; a Refresh will light up who is actually online.
+        # nothing is listed until a query has read the Radmin window
+        self._set_mode(None)
+        self._waiting = "manual mode, Refresh to query"
         self._render_peers(set())
         self._set_summary("● manual mode, Refresh to query" + ("" if running else " · VM off"))
 
@@ -667,6 +686,7 @@ class MainWindow(QMainWindow):
     def _ensure_done(self, res):
         if self._closing:
             return
+        self._agent_failed = (res == "failed")
         self._flash({"ok": "● VM agent up to date", "upgraded": "● VM agent updated",
                              "failed": "● could not update the VM agent (System > Reinstall)"}.get(res, res))
         QTimer.singleShot(1500, self.refresh)
@@ -700,6 +720,8 @@ class MainWindow(QMainWindow):
             self._vm_started_at = time.monotonic()
         if not st.ok:
             self._last_service = "Stopped"
+            self._live, self._live_online, self._live_via = None, set(), {}
+            self._set_mode(None)
             # qemu alive but the agent not answering yet = VM BOOTING (not off)
             self._booting = bool(st.vm_running)
             if not st.vm_running:
@@ -748,15 +770,24 @@ class MainWindow(QMainWindow):
         self._set_badge("Online" if on else "Offline", "on" if on else "off")
         self._sync_actions(on)
 
-        # agent 5+: the real member list, read from the Radmin window. ARP and
-        # the GUI memory dump are only the fallback for older agents.
+        # agent 5+: the real member list, read from the Radmin window. Until
+        # that reading is complete the list stays empty. ARP and the GUI memory
+        # dump are only the fallback when the VM agent could not be updated.
         live = self._take_live(st.radmin)
+        if live is not None or (_api_num(st.api) >= 5 and self._live is not None):
+            self._set_mode("live")         # a short reader hiccup keeps the last list
+        elif self._agent_failed:
+            self._set_mode("fallback")
+        else:
+            self._set_mode(None)
+            self._waiting = (st.radmin or {}).get("error") or (
+                "updating the VM agent" if _api_num(st.api) < 5 else "reading the Radmin window")
         new_peer = False
         if live is not None:
             for net in live:
                 for m in net["members"]:
                     new_peer |= self.roster.seen(m["ip"], "", m["name"])
-        else:
+        elif self._mode == "fallback":
             # discover new peers via ARP (the agent already filters 26.0.0.1)
             for p in st.peers:
                 if p.ip == "26.0.0.1":
@@ -771,8 +802,10 @@ class MainWindow(QMainWindow):
 
         # liveness: ARP marks who is up; the ping sweep (own timer) refines it.
         # Ping right away only when something changed, not on every refresh.
-        if live is not None:
+        if self._mode == "live":
             self._render_peers(self._live_online | self._ping_online)
+        elif self._mode is None:
+            self._render_peers(set())
         else:
             arp = {p.ip for p in st.peers if p.ip != "26.0.0.1"}
             self._render_peers(self._ping_online | {ip for ip in arp if ip not in self._pinged})
@@ -782,7 +815,7 @@ class MainWindow(QMainWindow):
             self.ping_now()
 
         # first discovery only now, with the VM confirmed on and the service up
-        if getattr(self, "_want_discover", False) and on and live is None:
+        if getattr(self, "_want_discover", False) and on and self._mode == "fallback":
             self._want_discover = False
             QTimer.singleShot(3000, self.discover_now)
 
@@ -790,12 +823,11 @@ class MainWindow(QMainWindow):
         """Keep the agent's view of the Radmin window. Returns the networks or
         None (old agent / reader not running: the ARP + roster fallback)."""
         if not isinstance(r, dict) or not r.get("ok") or not isinstance(r.get("networks"), list):
-            was = self._live is not None
-            self._live, self._live_online, self._live_via = None, set(), {}
-            self.addNetBtn.setToolTip("Create a network group, then right-click a peer to move it in")
-            if was:
-                self.actSync.setVisible(True)
-                self._rows_reset()
+            return None
+        status = str(r.get("status") or "")
+        if not r["networks"] and status.lower() != "online":
+            # Radmin still connecting: an empty list now would be a guess
+            self._waiting = f"Radmin is {status.lower() or 'starting'}"
             return None
         nets, online, via = [], set(), {}
         for n in r["networks"]:
@@ -811,22 +843,27 @@ class MainWindow(QMainWindow):
                     online.add(ip)
                     via[ip] = str(m.get("via") or "")
             nets.append({"name": str(n.get("name") or "?"), "members": ms})
-        if self._live is None:
-            self._rows_reset()
-            self.addNetBtn.setToolTip("Join or create a Radmin network")
-            self.actSync.setVisible(False)     # the GUI dump is not needed any more
         self._live, self._live_online, self._live_via = nets, online, via
         return nets
 
-    def _rows_reset(self):
-        """Switching between the live and the fallback list: start from scratch."""
-        self._place([])
+    def _set_mode(self, mode):
+        if mode == self._mode:
+            return
+        self._mode = mode
+        self._place([])            # start the list from scratch
         self._layout_sig = None
+        fb = mode == "fallback"
+        self.actSync.setVisible(fb)   # the GUI dump only makes sense for old agents
+        self.addNetBtn.setToolTip("Create a network group, then right-click a peer to move it in"
+                                  if fb else "Join or create a Radmin network")
 
     def _peer_ips(self):
-        """IPs the list shows: Radmin's members (live) or the local roster."""
-        if self._live is not None:
+        """IPs the list shows: Radmin's members (live), the local roster
+        (fallback) or nothing while the reading is not done."""
+        if self._mode == "live" and self._live is not None:
             return sorted({m["ip"] for n in self._live for m in n["members"]})
+        if self._mode != "fallback":
+            return []
         return [ip for ip in self.roster.all_ips() if ip != self._node_ip and ip != "26.0.0.1"]
 
     def _render_peers(self, online_set, rtt=None):
@@ -886,8 +923,14 @@ class MainWindow(QMainWindow):
             self._update_summary()
             return
         self._list_dirty = False
-        if self._live is not None:
+        if self._mode == "live" and self._live is not None:
             return self._rebuild_live()
+        if self._mode != "fallback":
+            self._place([])
+            self._layout_sig = None
+            self._hidden_rows = 0
+            self._update_summary()
+            return
         online = self._online
         online_only = bool(self.roster.get_setting("online_only", False))
         peers = [ip for ip in self.roster.all_ips()
@@ -972,7 +1015,11 @@ class MainWindow(QMainWindow):
             return
         flt = " · online only" if self.roster.get_setting("online_only", False) else ""
         hidden = f" (+{self._hidden_rows} hidden)" if self._hidden_rows else ""
-        if self._live is not None:
+        if self._mode is None:
+            self._set_summary(f"● {self._waiting}…")
+            self._update_tray()
+            return
+        if self._mode == "live":
             if not self._live:
                 self._set_summary("● no network yet · Network > Join or Create")
                 self._update_tray()
@@ -1003,7 +1050,7 @@ class MainWindow(QMainWindow):
 
     # ---------- network groups (manual assignment) ----------
     def _add_group(self):
-        if self._live is not None:
+        if self._mode != "fallback":
             # live list: the sections are Radmin's own networks
             m = QMenu(self)
             m.addAction("Join a network…", self.do_join)
@@ -1061,7 +1108,7 @@ class MainWindow(QMainWindow):
         m.addAction(f"Copy IP  {ip}", lambda: (QGuiApplication.clipboard().setText(ip),
                                               self._flash(f"● {ip} copied")))
         m.addAction("Rename…", lambda: self._rename(ip))
-        if self._live is not None:
+        if self._mode != "fallback":
             m.exec(pos)
             return
         move = m.addMenu("Move to network")
@@ -1407,6 +1454,11 @@ class MainWindow(QMainWindow):
             self._run_action(actions.disconnect, "Disconnecting")
 
     def do_leave(self):
+        if self._mode != "fallback":
+            # the registry keeps networks you already left, so its list is not
+            # the truth; Radmin's own window is
+            self._open_gui_for("leave a network (right click it, then Leave network)")
+            return
         from PySide6.QtWidgets import QMessageBox
         guids = backend.list_networks()
         if not guids:
