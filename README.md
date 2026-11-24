@@ -59,7 +59,10 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.4.0**: in-app updates, tray icon with
+See [CHANGELOG.md](CHANGELOG.md). **0.5.0**: the peer list is read from the real
+Radmin window (network names, members, IPs) and online comes from Radmin
+itself, so the app shows exactly what Radmin shows, refreshed every 5 s.
+**0.4.0**: in-app updates, tray icon with
 the state, ping time per peer, settings to start with the session and turn the
 VM on with the app, one instance only, lighter refresh. **0.3.0**: own identity
 per install, instant window (agent API), VM at about 2% of one core, clean
@@ -77,9 +80,11 @@ VNC picture, firewall in the VM, a curl installer that resumes and verifies.
 * **The agent** (`agent/`, runs in the VM as scheduled tasks): gives the install
   its own identity, hardens Windows, keeps ICS applied, never sleeps, self
   repairs every 15 min and serves a small JSON API on the private link only.
-* **The app** (`app/`, PySide6): node, status and peers (online from ARP and
-  ping, offline from a local roster, full member list from the Radmin window),
-  connect/disconnect, rename, leave, Radmin updates, tray icon, watchdog.
+* **The app** (`app/`, PySide6): node, status and one section per Radmin
+  network with its members. The agent reads the Radmin window through UI
+  Automation (names, IPs) and Radmin's own log (who is connected, direct or
+  relay); ping adds the response time (older agents fall back to ARP + ping).
+  Also connect/disconnect, rename, leave, Radmin updates, tray icon, watchdog.
 * **Join / create a network** needs the real Radmin window (it does the
   handshake with the Radmin servers): the app brings it to the front and opens
   it in a VNC viewer.

@@ -4,6 +4,8 @@
 #   RadminAgent-Api      at power-on (SYSTEM): api.ps1, no time limit, restarts if it dies
 #   RadminAgent-Health   every 15 min (SYSTEM): health.ps1 -Heal
 #   RadminAgent-ShowGui  on demand, in the desktop session: brings the Radmin window up
+#   RadminAgent-GuiReader at logon, in the desktop session: gui-reader.ps1 reads
+#                        the Radmin window (networks, members) for the API
 #  Removes the v1 tasks (Power / Net / Net-Logon), now folded into boot.ps1.
 # ============================================================
 $ErrorActionPreference = "SilentlyContinue"
@@ -14,7 +16,7 @@ $psArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidde
 
 # stop a running API (upgrade): the new api.ps1 starts at the end
 & schtasks.exe /end /tn "RadminAgent-Api" 2>&1 | Out-Null
-Get-WmiObject Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match "api\.ps1" } | ForEach-Object { [void]$_.Terminate() }
+Get-WmiObject Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match "api\.ps1|gui-reader\.ps1" } | ForEach-Object { [void]$_.Terminate() }
 
 foreach ($t in "RadminAgent-Power","RadminAgent-Net","RadminAgent-Net-Logon") {
   & schtasks.exe /delete /tn $t /f 2>&1 | Out-Null
@@ -57,6 +59,29 @@ Register "RadminAgent-Health" (TaskXml $ps "$psArgs $dir\health.ps1 -Heal" $ever
 # interactive task (runs in the desktop session of the autologon user)
 & schtasks.exe /create /tn "RadminAgent-ShowGui" /tr "wscript.exe $dir\show-gui.vbs" /sc once /st 00:00 /sd 01/01/2000 /ru bench /rp bench /it /f 2>&1 | Out-Null
 
+# long running reader in the desktop session (no time limit; the API restarts
+# it when its output goes stale)
+$reader = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>bench</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>bench</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>wscript.exe</Command><Arguments>$dir\gui-reader.vbs</Arguments></Exec></Actions>
+</Task>
+"@
+Register "RadminAgent-GuiReader" $reader
+
 & schtasks.exe /run /tn "RadminAgent-Api" 2>&1 | Out-Null
+& schtasks.exe /run /tn "RadminAgent-GuiReader" 2>&1 | Out-Null
 Write-Output "<<<AGENTOK>>>"
 & schtasks.exe /query /fo csv 2>&1 | Select-String "RadminAgent" | ForEach-Object { $_.Line }

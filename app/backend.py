@@ -45,6 +45,10 @@ class State:
     api: str = ""              # agent API version ("" = answered over WMI)
     gui: bool = False          # Radmin GUI process running in the VM
     identity_reset: str = ""   # set once after the agent gave this VM a new identity
+    # agent 5+: what the Radmin window shows (gui-reader.ps1): {"ok", "alias",
+    # "ip", "status", "networks": [{"name", "members": [{"name", "ip",
+    # "online", "via"}]}]}. None = old agent or the reader is not running.
+    radmin: dict | None = None
 
 
 _last: "State | None" = None
@@ -159,6 +163,7 @@ def _state_from_dict(d: dict, api_ver: str = "") -> State:
         api=api_ver,
         gui=bool(d.get("gui", False)),
         identity_reset=d.get("identity_reset") or "",
+        radmin=d.get("radmin") if isinstance(d.get("radmin"), dict) else None,
     )
     for p in d.get("peers", []):
         st.peers.append(Peer(ip=p.get("ip", ""), mac=p.get("mac", ""),

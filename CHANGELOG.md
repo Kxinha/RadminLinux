@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.0 (2026-11-24)
+
+### The list now matches the Radmin window
+* The VM agent (version 5) reads the real Radmin window through Windows UI
+  Automation: network names, member names and member IPs, exactly what Radmin
+  shows, in about 30 ms. Before, the app guessed from ARP (only peers that had
+  already sent traffic), NetBIOS lookups (up to 3.6 s per refresh) and a
+  ~200 MB memory dump of the Radmin window, so it showed stale peers from old
+  networks and missed real members.
+* Online comes from Radmin itself: the agent follows Radmin's own
+  `service.log` (connected, disconnected, direct UDP/TCP or relay). Peers that
+  block ping (most Windows PCs) no longer show as offline. Ping still adds
+  the response time, and the row says "relay" when Radmin goes through one.
+* One section per Radmin network with "online/total"; old peers that are not
+  in any of your networks no longer show up.
+* The list refreshes every 5 s while the window is open (`/state` is a file
+  read in the VM now, ~15 ms). In the tray it stays at 60 s.
+* "＋ Network" offers Join or Create; right click on a network copies its name
+  or opens the Radmin window.
+* Older agents keep working with the previous list (ARP, ping, member sync).
+
+### How
+* New `agent/gui-reader.ps1`, started at logon in the VM desktop session (task
+  RadminAgent-GuiReader). It keeps the Radmin window running minimized (Qt
+  hides the list from UI Automation while the window sits in the tray) and
+  leaves a window you opened through VNC alone. About 50 MB of RAM and under
+  1% of the VM's CPU; the VM stays at about 3% of one host core.
+* The API restarts the reader when its output goes stale.
+
 ## 0.4.0 (2026-11-24)
 
 ### Updates

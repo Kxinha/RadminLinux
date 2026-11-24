@@ -26,7 +26,7 @@ import config
 import updater
 from roster import Roster
 
-POLL_MS = 15000    # state refresh (agent API, < 1 s) every 15s
+POLL_MS = 5000     # state refresh (agent API, ~50 ms: a file read in the VM)
 PING_MS = 30000    # liveness (ping sweep) every 30s
 # window hidden in the tray: nobody looks at the list, so poll 4x less
 POLL_HIDDEN_MS = 60000
@@ -212,9 +212,10 @@ def _repolish(w):
 class PeerRow(QFrame):
     """One peer. Rows are reused across refreshes: set_state() only touches what
     changed, so a refresh no longer rebuilds hundreds of widgets."""
-    def __init__(self, ip, on_rename, on_menu=None):
+    def __init__(self, ip, on_rename, on_menu=None, key=None):
         super().__init__()
         self.ip = ip
+        self.key = key or ip      # the same peer can be in two networks
         self._on_menu = on_menu
         self._on_rename = on_rename
         self.setObjectName("peerRow")
@@ -223,6 +224,7 @@ class PeerRow(QFrame):
         self._online = None
         self._label = None
         self._rtt = None
+        self._via = None
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 4, 12, 4)
         lay.setSpacing(8)
@@ -236,7 +238,7 @@ class PeerRow(QFrame):
         self.ipLbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(self.ipLbl)
 
-    def set_state(self, label, online, rtt=None):
+    def set_state(self, label, online, rtt=None, via=""):
         if online != self._online:
             self._online = online
             self.sig.setPixmap(icons.signal_pixmap(online, 18))
@@ -246,10 +248,18 @@ class PeerRow(QFrame):
             self._label = label
             self.nameLbl.setText(label)
         rtt = rtt if online else None
-        if rtt != self._rtt:
+        via = via if online else ""
+        if rtt != self._rtt or via != self._via:
             self._rtt = rtt
-            self.rttLbl.setText("" if rtt is None else (f"{rtt:.0f} ms" if rtt >= 1 else "<1 ms"))
-            self.setToolTip(f"{self.ip}" + ("" if rtt is None else f" · ping {rtt:.1f} ms"))
+            self._via = via
+            relay = via.lower() == "tcprelay"
+            txt = "" if rtt is None else (f"{rtt:.0f} ms" if rtt >= 1 else "<1 ms")
+            if relay:
+                txt = (txt + " · relay") if txt else "relay"
+            self.rttLbl.setText(txt)
+            how = {"udp": "direct (UDP)", "tcp": "direct (TCP)", "tcprelay": "through a Radmin relay"}.get(via.lower(), "")
+            self.setToolTip(f"{self.ip}" + ("" if rtt is None else f" · ping {rtt:.1f} ms")
+                            + (f" · {how}" if how else ""))
 
     def mouseDoubleClickEvent(self, e):
         self._on_rename(self.ip)
@@ -295,6 +305,9 @@ class MainWindow(QMainWindow):
         self._ping_online = set()   # answered the last ping sweep
         self._pinged = set()        # were in the last ping sweep (ping beats ARP)
         self._rtt = {}
+        self._live = None          # networks as the Radmin window shows them (agent 5+)
+        self._live_online = set()  # members Radmin is connected to (service.log)
+        self._live_via = {}        # ip -> UDP / TCP / TcpRelay
         self._hidden_rows = 0
         self._n_online = 0
         self._summary = ""
@@ -735,12 +748,20 @@ class MainWindow(QMainWindow):
         self._set_badge("Online" if on else "Offline", "on" if on else "off")
         self._sync_actions(on)
 
-        # discover new peers via ARP (the agent already filters 26.0.0.1)
+        # agent 5+: the real member list, read from the Radmin window. ARP and
+        # the GUI memory dump are only the fallback for older agents.
+        live = self._take_live(st.radmin)
         new_peer = False
-        for p in st.peers:
-            if p.ip == "26.0.0.1":
-                continue
-            new_peer |= self.roster.seen(p.ip, p.mac, p.host)
+        if live is not None:
+            for net in live:
+                for m in net["members"]:
+                    new_peer |= self.roster.seen(m["ip"], "", m["name"])
+        else:
+            # discover new peers via ARP (the agent already filters 26.0.0.1)
+            for p in st.peers:
+                if p.ip == "26.0.0.1":
+                    continue
+                new_peer |= self.roster.seen(p.ip, p.mac, p.host)
         if new_peer:
             self.roster.save()
         else:
@@ -750,17 +771,63 @@ class MainWindow(QMainWindow):
 
         # liveness: ARP marks who is up; the ping sweep (own timer) refines it.
         # Ping right away only when something changed, not on every refresh.
-        arp = {p.ip for p in st.peers if p.ip != "26.0.0.1"}
-        self._render_peers(self._ping_online | {ip for ip in arp if ip not in self._pinged})
+        if live is not None:
+            self._render_peers(self._live_online | self._ping_online)
+        else:
+            arp = {p.ip for p in st.peers if p.ip != "26.0.0.1"}
+            self._render_peers(self._ping_online | {ip for ip in arp if ip not in self._pinged})
         if not on:
             self._set_summary("● Radmin is disconnected (Network > Connect)")
         if first or new_peer:
             self.ping_now()
 
         # first discovery only now, with the VM confirmed on and the service up
-        if getattr(self, "_want_discover", False) and on:
+        if getattr(self, "_want_discover", False) and on and live is None:
             self._want_discover = False
             QTimer.singleShot(3000, self.discover_now)
+
+    def _take_live(self, r):
+        """Keep the agent's view of the Radmin window. Returns the networks or
+        None (old agent / reader not running: the ARP + roster fallback)."""
+        if not isinstance(r, dict) or not r.get("ok") or not isinstance(r.get("networks"), list):
+            was = self._live is not None
+            self._live, self._live_online, self._live_via = None, set(), {}
+            self.addNetBtn.setToolTip("Create a network group, then right-click a peer to move it in")
+            if was:
+                self.actSync.setVisible(True)
+                self._rows_reset()
+            return None
+        nets, online, via = [], set(), {}
+        for n in r["networks"]:
+            if not isinstance(n, dict):
+                continue
+            ms = []
+            for m in n.get("members") or []:
+                ip = str(m.get("ip") or "")
+                if not ip.startswith("26.") or ip == self._node_ip:
+                    continue
+                ms.append({"ip": ip, "name": str(m.get("name") or "")})
+                if m.get("online"):
+                    online.add(ip)
+                    via[ip] = str(m.get("via") or "")
+            nets.append({"name": str(n.get("name") or "?"), "members": ms})
+        if self._live is None:
+            self._rows_reset()
+            self.addNetBtn.setToolTip("Join or create a Radmin network")
+            self.actSync.setVisible(False)     # the GUI dump is not needed any more
+        self._live, self._live_online, self._live_via = nets, online, via
+        return nets
+
+    def _rows_reset(self):
+        """Switching between the live and the fallback list: start from scratch."""
+        self._place([])
+        self._layout_sig = None
+
+    def _peer_ips(self):
+        """IPs the list shows: Radmin's members (live) or the local roster."""
+        if self._live is not None:
+            return sorted({m["ip"] for n in self._live for m in n["members"]})
+        return [ip for ip in self.roster.all_ips() if ip != self._node_ip and ip != "26.0.0.1"]
 
     def _render_peers(self, online_set, rtt=None):
         self._online = set(online_set)
@@ -781,7 +848,7 @@ class MainWindow(QMainWindow):
             w = self.listv.takeAt(0).widget()
             if w is not None and id(w) not in keep:
                 if isinstance(w, PeerRow):
-                    self._rows.pop(w.ip, None)
+                    self._rows.pop(w.key, None)
                 elif isinstance(w, NetHeader):
                     self._headers.pop(w.gid or "__unassigned__", None)
                 w.deleteLater()
@@ -789,11 +856,13 @@ class MainWindow(QMainWindow):
             self.listv.insertWidget(n, w)
             w.show()
 
-    def _row(self, ip):
-        r = self._rows.get(ip)
+    def _row(self, ip, section=None):
+        key = f"{section}|{ip}" if section else ip
+        r = self._rows.get(key)
         if r is None:
-            r = self._rows[ip] = PeerRow(ip, self._rename, self._peer_menu)
-        r.set_state(self.roster.label_of(ip), ip in self._online, self._rtt.get(ip))
+            r = self._rows[key] = PeerRow(ip, self._rename, self._peer_menu, key)
+        r.set_state(self.roster.label_of(ip), ip in self._online, self._rtt.get(ip),
+                    self._live_via.get(ip, ""))
         return r
 
     def _header(self, gid, name, count, collapsed):
@@ -817,6 +886,8 @@ class MainWindow(QMainWindow):
             self._update_summary()
             return
         self._list_dirty = False
+        if self._live is not None:
+            return self._rebuild_live()
         online = self._online
         online_only = bool(self.roster.get_setting("online_only", False))
         peers = [ip for ip in self.roster.all_ips()
@@ -862,15 +933,55 @@ class MainWindow(QMainWindow):
         self._hidden_rows = max(0, total - shown)
         self._update_summary()
 
+    def _rebuild_live(self):
+        """One section per Radmin network, in the window's order, with exactly
+        its members. Online = Radmin is connected to them (or they answer ping)."""
+        online = self._online
+        online_only = bool(self.roster.get_setting("online_only", False))
+        widgets, shown, total = [], 0, 0
+        for net in self._live:
+            key = "net:" + net["name"]
+            ms = sorted(net["members"], key=lambda m: (m["ip"] not in online,
+                                                       self.roster.label_of(m["ip"]).lower()))
+            n_on = sum(1 for m in ms if m["ip"] in online)
+            if online_only:
+                ms = [m for m in ms if m["ip"] in online]
+                if not ms:
+                    continue
+            total += len(ms)
+            collapsed = self.roster.is_collapsed(key)
+            widgets.append(self._header(key, net["name"], f"{n_on}/{len(net['members'])}", collapsed))
+            if collapsed:
+                continue
+            for m in ms:
+                if shown >= MAX_ROWS:
+                    break
+                widgets.append(self._row(m["ip"], key)); shown += 1
+        sig = tuple(map(id, widgets))
+        if sig != self._layout_sig:
+            self._place(widgets)
+            self._layout_sig = sig
+        self._hidden_rows = max(0, total - shown)
+        self._update_summary()
+
     def _update_summary(self):
-        peers = [ip for ip in self.roster.all_ips() if ip != self._node_ip and ip != "26.0.0.1"]
+        peers = self._peer_ips()
         nact = sum(1 for ip in peers if ip in self._online)
         self._n_online = nact
         if not self._vm_running or self._booting or self._last_service != "Running":
             return
         flt = " · online only" if self.roster.get_setting("online_only", False) else ""
         hidden = f" (+{self._hidden_rows} hidden)" if self._hidden_rows else ""
-        self._set_summary(f"● {nact} online · {len(peers)} known{flt}{hidden} · node {self._node_ip or '—'}")
+        if self._live is not None:
+            if not self._live:
+                self._set_summary("● no network yet · Network > Join or Create")
+                self._update_tray()
+                return
+            nn = len(self._live)
+            known = f"{len(peers)} members · {nn} network" + ("s" if nn != 1 else "")
+        else:
+            known = f"{len(peers)} known"
+        self._set_summary(f"● {nact} online · {known}{flt}{hidden} · node {self._node_ip or '—'}")
         self._update_tray()
 
     # ---------- status line: summary + short-lived messages ----------
@@ -892,6 +1003,13 @@ class MainWindow(QMainWindow):
 
     # ---------- network groups (manual assignment) ----------
     def _add_group(self):
+        if self._live is not None:
+            # live list: the sections are Radmin's own networks
+            m = QMenu(self)
+            m.addAction("Join a network…", self.do_join)
+            m.addAction("Create network…", self.do_create)
+            m.exec(self.addNetBtn.mapToGlobal(self.addNetBtn.rect().bottomLeft()))
+            return
         text, ok = QInputDialog.getText(self, "New network", "Network name:")
         if ok and text.strip():
             self.roster.add_group(text.strip())
@@ -909,6 +1027,14 @@ class MainWindow(QMainWindow):
     def _group_menu(self, gid, pos):
         if gid is None:
             return   # the Unassigned section has nothing to rename/delete
+        if gid.startswith("net:"):     # a real Radmin network (live list)
+            name = gid[4:]
+            m = QMenu(self)
+            m.addAction("Copy network name", lambda: (QGuiApplication.clipboard().setText(name),
+                                                     self._flash(f"● {name} copied")))
+            m.addAction("Open the Radmin window", self._open_vnc)
+            m.exec(pos)
+            return
         m = QMenu(self)
         m.addAction("Rename…", lambda: self._rename_group(gid))
         m.addAction("Delete network", lambda: self._delete_group(gid))
@@ -935,6 +1061,9 @@ class MainWindow(QMainWindow):
         m.addAction(f"Copy IP  {ip}", lambda: (QGuiApplication.clipboard().setText(ip),
                                               self._flash(f"● {ip} copied")))
         m.addAction("Rename…", lambda: self._rename(ip))
+        if self._live is not None:
+            m.exec(pos)
+            return
         move = m.addMenu("Move to network")
         cur = self.roster.group_of(ip)
         for g in self.roster.groups():
@@ -974,7 +1103,7 @@ class MainWindow(QMainWindow):
             return
         if self._pinger and self._pinger.isRunning():
             return
-        ips = [ip for ip in self.roster.all_ips() if ip != "26.0.0.1"]
+        ips = self._peer_ips()
         if not ips:
             return
         self._pinger = Pinger(ips)
@@ -987,7 +1116,7 @@ class MainWindow(QMainWindow):
         online = {ip for ip, rtt in result.items() if rtt is not None}
         self._pinged = set(result)
         self._ping_online = online
-        self._render_peers(online, {ip: rtt for ip, rtt in result.items() if rtt is not None})
+        self._render_peers(online | self._live_online, {ip: rtt for ip, rtt in result.items() if rtt is not None})
 
     # ---------- full-list discovery (GUI dump) ----------
     def discover_now(self):

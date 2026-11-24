@@ -10,7 +10,9 @@
 #  192.168.137.0/24 and every connection from anywhere else is dropped here.
 #
 #  GET  /ping                      {"ok":true,"version":...}
-#  GET  /state                     node, service, networks, peers (ARP)
+#  GET  /state                     node, service, networks, peers (ARP) and
+#                                  "radmin": what the Radmin window shows
+#                                  (gui-reader.ps1: networks, members, online)
 #  GET  /health[?heal=1]           health.ps1 report
 #  GET  /update[?install=1]        radmin-update.ps1 report
 #  POST /connect /disconnect       start/stop RvControlSvc
@@ -73,8 +75,34 @@ function Get-NbName($ip) {
   return $hn
 }
 
+# gui-state.json is written by gui-reader.ps1 (desktop session) every few
+# seconds; older than 30 s = the reader is not running, report null.
+function Get-GuiState {
+  $f = "$DIR\gui-state.json"
+  try {
+    $i = Get-Item $f
+    if (-not $i -or ([DateTime]::UtcNow - $i.LastWriteTimeUtc).TotalSeconds -gt 30) {
+      # reader not running (killed, crashed, logon raced the task): start it,
+      # at most once a minute
+      $now = [DateTime]::UtcNow
+      if (-not $script:kickAt -or ($now - $script:kickAt).TotalSeconds -ge 60) {
+        $script:kickAt = $now
+        & schtasks.exe /run /tn "RadminAgent-GuiReader" 2>&1 | Out-Null
+      }
+      return $null
+    }
+    $t = [IO.File]::ReadAllText($f).Trim()
+    if ($t.StartsWith("{") -and $t.EndsWith("}")) { return $t }
+  } catch {}
+  return $null
+}
+
 function Get-StateJson {
+  $gs = Get-GuiState
+  # member names come from the Radmin window now; NetBIOS is only the fallback
+  # (each lookup can take 1.2 s and it made /state slow)
   $script:nbBudget = 3       # at most 3 new NetBIOS lookups per request (~3.6 s worst case)
+  if ($gs) { $script:nbBudget = 0 }
   # the node address barely ever changes and the WMI adapter query is the most
   # expensive part of a refresh inside the VM: ask WMI at most once a minute
   $now = [DateTime]::UtcNow
@@ -105,12 +133,13 @@ function Get-StateJson {
   $note = ""
   if (Test-Path "$DIR\identity-reset.txt") { $note = (Get-Content "$DIR\identity-reset.txt" | Select-Object -First 1) }
   $gui = [bool](Get-Process RvRvpnGui)
+  if (-not $gs) { $gs = "null" }
   $ts = [int][double]::Parse((Get-Date -UFormat %s))
   return '{"ok":true,"api":' + (JStr $VERSION) + ',"node_ip":' + (JStr $nodeIp) +
          ',"hostname":' + (JStr $env:COMPUTERNAME) + ',"alias":' + (JStr $alias) +
          ',"service":' + (JStr $svc) + ',"gui":' + (JBool $gui) +
          ',"identity_reset":' + (JStr $note) +
-         ',"networks":[' + ($nets -join ',') + '],"peers":[' + ($peers -join ',') + '],"ts":' + $ts + '}'
+         ',"networks":[' + ($nets -join ',') + '],"peers":[' + ($peers -join ',') + '],"radmin":' + $gs + ',"ts":' + $ts + '}'
 }
 
 # run another agent script and return its stdout as one string
