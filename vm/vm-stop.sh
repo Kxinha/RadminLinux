@@ -6,8 +6,9 @@ for c in "$HERE/../env.sh" "$HERE/env.sh"; do [[ -f "$c" ]] && source "$c" && br
 P="$RADMIN_VMDIR/qemu.pid"
 [[ -f "$P" ]] || { echo "VM is not running"; exit 0; }
 PID=$(cat "$P")
+echo "$PID" > "$RADMIN_VMDIR/stopping"   # the app shows "Shutting down" meanwhile
 printf 'system_powerdown\n' | timeout 10 socat -,ignoreeof UNIX-CONNECT:"$RADMIN_VMDIR/monitor.sock" >/dev/null 2>&1
 for i in $(seq 1 60); do kill -0 "$PID" 2>/dev/null || break; sleep 2; done
 kill -0 "$PID" 2>/dev/null && kill "$PID" 2>/dev/null
-rm -f "$P" "$RADMIN_VMDIR/monitor.sock"
+rm -f "$P" "$RADMIN_VMDIR/monitor.sock" "$RADMIN_VMDIR/stopping"
 echo "off"

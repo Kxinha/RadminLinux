@@ -59,7 +59,8 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.5.1**: the list stays empty until the
+See [CHANGELOG.md](CHANGELOG.md). **0.5.2**: "Shutting down" while the VM
+turns off (it said "Starting"). **0.5.1**: the list stays empty until the
 Radmin window has been read (no old peers or networks you left), and the VM
 closes the Windows activation dialog at logon, so Radmin is ready about 2
 minutes sooner. **0.5.0**: the peer list is read from the real

@@ -10,6 +10,10 @@ import config
 VMDIR = config.VMDIR
 MONITOR = os.path.join(VMDIR, "monitor.sock")
 PIDFILE = os.path.join(VMDIR, "qemu.pid")
+# "stopping" holds the qemu pid while a shutdown is in progress (written by
+# power_off and vm-stop.sh), so every app window and the tray can say "Shutting
+# down" instead of mistaking the quiet VM for one that is booting.
+STOPFLAG = os.path.join(VMDIR, "stopping")
 RUN = config.RUN_SCRIPT
 PREFLIGHT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "preflight.sh")
 
@@ -29,6 +33,27 @@ def _pid() -> int | None:
 
 def is_running() -> bool:
     return _pid() is not None
+
+
+def is_stopping() -> bool:
+    """A shutdown was requested and this same qemu is still running."""
+    try:
+        with open(STOPFLAG) as f:
+            want = int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return False
+    return want != 0 and want == _pid()
+
+
+def _mark_stopping(pid: int | None):
+    try:
+        if pid:
+            with open(STOPFLAG, "w") as f:
+                f.write(str(pid))
+        else:
+            os.remove(STOPFLAG)
+    except OSError:
+        pass
 
 
 def _monitor(cmd: str, timeout: float = 8) -> str:
@@ -52,19 +77,20 @@ def _monitor(cmd: str, timeout: float = 8) -> str:
 
 def power_off(timeout: int = 60) -> bool:
     """Shut the VM down (ACPI). Wait for it to actually exit."""
-    if not is_running():
-        return True
-    _monitor("system_powerdown")
     pid = _pid()
     if pid is None:
         return True
+    _mark_stopping(pid)
+    _monitor("system_powerdown")
     for _ in range(timeout):
         try:
             os.kill(pid, 0)
         except OSError:
+            _mark_stopping(None)
             return True
         time.sleep(1)
-    return False  # did not shut down in time
+    # still going: the flag stays (it only counts for this qemu pid)
+    return False
 
 
 def power_off_hard() -> bool:
@@ -88,10 +114,11 @@ def power_off_hard() -> bool:
             time.sleep(1)
     except OSError:
         pass
-    try:
-        os.remove(PIDFILE)
-    except OSError:
-        pass
+    for f in (PIDFILE, STOPFLAG):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
     return True
 
 

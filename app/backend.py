@@ -49,6 +49,7 @@ class State:
     # "ip", "status", "networks": [{"name", "members": [{"name", "ip",
     # "online", "via"}]}]}. None = old agent or the reader is not running.
     radmin: dict | None = None
+    stopping: bool = False     # a shutdown is in progress (vmctl STOPFLAG)
 
 
 _last: "State | None" = None
@@ -200,6 +201,8 @@ def fetch_state(timeout: int = 40, allow_wmi: bool = True) -> State:
         import vmctl
         if not vmctl.is_running():
             return State(ok=False, vm_running=False, error="VM is off")
+        if vmctl.is_stopping():
+            return State(ok=False, vm_running=True, stopping=True, error="VM shutting down")
     except Exception:  # noqa
         pass
     d = api("/state", timeout=10)

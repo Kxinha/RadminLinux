@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.2 (2026-11-24)
+
+* While the VM shuts down the app says "Shutting down… / VM is turning off,
+  please wait" (badge "Stopping", tray "shutting down") instead of
+  "Starting… / VM is booting". Before, a VM that was going away looked the
+  same as one coming up: the process was still there and the agent had stopped
+  answering.
+* Works for the power button, the tray menu and `bench-stop.sh`: the shutdown
+  leaves a `stopping` file with the qemu pid in the VM folder while it runs.
+* During the shutdown the power button only says it is shutting down,
+  Connect and the tray power entry are disabled, the watchdog never
+  "recovers" a VM that is shutting down, and there is no
+  "Radmin VPN stopped" alert when it was turned off on purpose.
+* Turning off from the app waits up to 2 minutes for Windows and then stops
+  the VM, like `bench-stop.sh` (before, a stuck shutdown left it half off).
+
 ## 0.5.1 (2026-11-24)
 
 ### The list only shows what Radmin shows

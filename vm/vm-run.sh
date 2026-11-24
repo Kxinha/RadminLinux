@@ -51,6 +51,7 @@ if ip link show "$RADMIN_TAP" >/dev/null 2>&1; then
 fi
 echo ">> VM headless: ${RAM}MB / ${SMP} vCPU | net ${NET0[1]%%,*} | VNC 127.0.0.1:$((5900 + VNC_DISPLAY))"
 
+rm -f "$RADMIN_VMDIR/stopping"   # left by a shutdown that did not finish
 IONICE=(); command -v ionice >/dev/null && IONICE=(ionice -c2 -n7)
 exec "${IONICE[@]}" qemu-system-x86_64 \
   -name "Radmin VPN (Windows)",process=radmin-vm \

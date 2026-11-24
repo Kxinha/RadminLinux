@@ -290,6 +290,7 @@ class MainWindow(QMainWindow):
         self._threads = set()   # all live QThreads, for shutdown to wait on
         self._busy = False
         self._booting = False   # VM on but WMI not answering yet (booting)
+        self._stopping = False  # a shutdown is in progress (vmctl.is_stopping)
         self._closing = False
         self._last_service = "Unknown"
         self._vm_running = False
@@ -621,6 +622,8 @@ class MainWindow(QMainWindow):
         """Reflect the state in the tray icon, tooltip and menu."""
         if not self._vm_running:
             tip, state = "Radmin VPN · VM off", "off"
+        elif self._stopping:
+            tip, state = "Radmin VPN · shutting down", "warn"
         elif self._booting:
             tip, state = "Radmin VPN · starting", "warn"
         elif self._last_service == "Running":
@@ -634,9 +637,10 @@ class MainWindow(QMainWindow):
             self.tray.setIcon(icons.tray_icon(state))
         if hasattr(self, "trayConn"):
             self.trayConn.setText("Disconnect" if self._last_service == "Running" else "Connect")
-            self.trayConn.setEnabled(self._vm_running and not self._booting)
+            self.trayConn.setEnabled(self._vm_running and not self._booting and not self._stopping)
         if hasattr(self, "trayPower"):
             self.trayPower.setText("Turn VM off" if self._vm_running else "Turn VM on")
+            self.trayPower.setEnabled(not self._stopping)
 
     def _notify(self, title, text):
         if self.roster.get_setting("notify", True) and self.tray.isVisible():
@@ -712,6 +716,8 @@ class MainWindow(QMainWindow):
     def _apply(self, st: backend.State):
         if self._closing:
             return
+        if st.ok and self._stopping and self._busy:
+            return   # read just before the shutdown request: the VM is going away
         was_running = self._vm_running
         self._vm_running = st.vm_running
         if st.vm_running and not was_running:
@@ -722,17 +728,23 @@ class MainWindow(QMainWindow):
             self._last_service = "Stopped"
             self._live, self._live_online, self._live_via = None, set(), {}
             self._set_mode(None)
-            # qemu alive but the agent not answering yet = VM BOOTING (not off)
-            self._booting = bool(st.vm_running)
+            # qemu alive but the agent not answering = VM BOOTING, unless a
+            # shutdown is in progress (then it is going away, not coming up)
+            was_stopping = self._stopping
+            self._stopping = bool(st.vm_running and st.stopping)
+            self._booting = bool(st.vm_running) and not self._stopping
             if not st.vm_running:
                 self._agent_checked = False
                 self.nodeName.setText("VM is off")
                 self.nodeIp.setText("click power to turn on")
                 self._set_badge("Off", "off")
                 self.power.setPixmap(icons.power_pixmap(False, 48))
-                if was_running and not self._user_stopped and not self._busy:
+                # no alert when it went down on request (app, tray or bench-stop.sh)
+                if was_running and not self._user_stopped and not self._busy and not was_stopping:
                     self._notify("Radmin VPN stopped", "The Windows VM is no longer running.")
                 self._was_online = False
+            elif self._stopping:
+                self._show_stopping()
             else:
                 self.nodeName.setText("Starting…")
                 self.nodeIp.setText("VM is booting, please wait")
@@ -742,8 +754,11 @@ class MainWindow(QMainWindow):
             self._sync_actions(False)
             self._update_tray()
             self._clear_list()
-            # while booting, re-check often so the switch to online feels live.
-            # Cheap (one HTTP connect to the VM), so it runs in manual mode too.
+            # while booting or shutting down, re-check often so the switch to
+            # online / off feels live. Cheap (one HTTP connect to the VM, or a
+            # file read while stopping), so it runs in manual mode too.
+            if self._stopping and not self._closing:
+                QTimer.singleShot(BOOT_POLL_MS, self.refresh)
             if self._booting and not self._closing:
                 QTimer.singleShot(BOOT_POLL_MS, self.refresh)
                 # an old agent never brings the API up: upgrade it over WMI
@@ -753,6 +768,7 @@ class MainWindow(QMainWindow):
 
         first = self._booting or not was_running or self._last_service != "Running"
         self._booting = False
+        self._stopping = False
         self._maybe_ensure_agent(st)
         self._check_identity_notice(st)
         self._last_service = st.service
@@ -1011,7 +1027,7 @@ class MainWindow(QMainWindow):
         peers = self._peer_ips()
         nact = sum(1 for ip in peers if ip in self._online)
         self._n_online = nact
-        if not self._vm_running or self._booting or self._last_service != "Running":
+        if not self._vm_running or self._booting or self._stopping or self._last_service != "Running":
             return
         flt = " · online only" if self.roster.get_setting("online_only", False) else ""
         hidden = f" (+{self._hidden_rows} hidden)" if self._hidden_rows else ""
@@ -1207,7 +1223,8 @@ class MainWindow(QMainWindow):
             return
         if alive:
             in_grace = (time.monotonic() - self._vm_started_at) < WATCHDOG_GRACE_S
-            if not self._booting and not in_grace and not responsive:
+            # a VM that is shutting down is quiet on purpose: never "recover" it
+            if not self._booting and not self._stopping and not in_grace and not responsive:
                 self._unresponsive_strikes += 1
             else:
                 self._unresponsive_strikes = 0
@@ -1223,7 +1240,7 @@ class MainWindow(QMainWindow):
             self._unresponsive_strikes = 0
         # normal auto-heal: only when the VM is really up, not booting, and not
         # more often than HEAL_EVERY_S (each run starts a PowerShell in the VM)
-        if not self._vm_running or self._booting:
+        if not self._vm_running or self._booting or self._stopping:
             return
         if self._health and self._health.isRunning():
             return
@@ -1291,13 +1308,13 @@ class MainWindow(QMainWindow):
 
     # ---------- acoes (fase 3/4) ----------
     def _sync_actions(self, on: bool):
-        vm = self._vm_running
+        vm = self._vm_running and not self._stopping
         if hasattr(self, "actConnect"):
             self.actConnect.setEnabled(vm and not on and not self._busy)
             self.actDisconnect.setEnabled(vm and on and not self._busy)
             self.actLeave.setEnabled(vm and not self._busy)
         if hasattr(self, "actVmOn"):
-            self.actVmOn.setEnabled(not vm and not self._busy)
+            self.actVmOn.setEnabled(not self._vm_running and not self._busy)
             self.actVmOff.setEnabled(vm and not self._busy)
         if hasattr(self, "actGui"):
             self.actGui.setEnabled(vm)
@@ -1325,6 +1342,9 @@ class MainWindow(QMainWindow):
     def toggle_power(self):
         # the UI power button turns the WHOLE VM on/off (Radmin Linux = the VM)
         if self._busy:
+            return
+        if self._stopping:
+            self._flash("● the VM is shutting down…")
             return
         if self._vm_running:
             self.do_vm_off()
@@ -1355,17 +1375,32 @@ class MainWindow(QMainWindow):
             return
         self._busy = True
         self._user_stopped = True
-        self._flash("● turning VM off…")
-        self._sync_actions(True)
-        self._action = ActionWorker(lambda: (vmctl.power_off(), "off"))
-        self._action.done.connect(lambda ok, log: self._vm_action_done("Turning off"))
+        self._stopping = True
+        self._booting = False
+        self._show_stopping()
+        self._set_summary("● VM shutting down")
+        self._sync_actions(False)
+        self._clear_list()
+        self._update_tray()
+        # same as vm-stop.sh: 2 minutes for Windows to shut down, then qemu is
+        # stopped (otherwise a stuck shutdown would leave the VM half off)
+        self._action = ActionWorker(lambda: (
+            vmctl.power_off(timeout=120) or (vmctl.power_off_hard() and "forced"), "off"))
+        self._action.done.connect(lambda ok, log: self._vm_action_done(
+            "Turning off" if ok is True else "Windows did not shut down in 2 min, VM stopped", ok))
         self._start(self._action)
 
-    def _vm_action_done(self, label):
+    def _show_stopping(self):
+        self.nodeName.setText("Shutting down…")
+        self.nodeIp.setText("VM is turning off, please wait")
+        self._set_badge("Stopping", "warn")
+        self.power.setPixmap(icons.power_pixmap(True, 48))
+
+    def _vm_action_done(self, label, ok=True):
         if self._closing:
             return
         self._busy = False
-        self._flash(f"● {label}: ok")
+        self._flash(f"● {label}: ok" if ok is True else f"● {label}")
         self._sync_actions(False)
         # fire one early refresh; while the VM boots _apply keeps polling the API
         QTimer.singleShot(4000, self.refresh)
