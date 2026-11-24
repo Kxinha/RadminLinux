@@ -1,5 +1,5 @@
 Name:           radmin-linux
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Run Radmin VPN (Windows-only) on Linux via a headless VM
 
@@ -9,7 +9,7 @@ BuildArch:      noarch
 
 Requires:       qemu-system-x86-core
 Requires:       qemu-img
-Requires:       dnsmasq
+Requires:       zstd
 Requires:       NetworkManager
 Requires:       socat
 Requires:       python3 >= 3.11
@@ -32,7 +32,7 @@ install -d %{buildroot}%{_datadir}/radmin-linux
 cp -r %{srcdir}/app %{srcdir}/shim %{srcdir}/agent %{buildroot}%{_datadir}/radmin-linux/
 find %{buildroot}%{_datadir}/radmin-linux -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 install -m644 %{srcdir}/env.sh %{buildroot}%{_datadir}/radmin-linux/
-install -m755 %{srcdir}/preflight.sh %{srcdir}/radmin-linux.sh %{srcdir}/deploy-shim.sh \
+install -m755 %{srcdir}/preflight.sh %{srcdir}/radmin-linux.sh %{srcdir}/uninstall.sh \
         %{srcdir}/deploy-agent.sh %{srcdir}/install.sh %{srcdir}/build-vm.sh \
         %{buildroot}%{_datadir}/radmin-linux/
 install -d %{buildroot}%{_datadir}/radmin-linux/vm
@@ -58,5 +58,8 @@ echo "  %{_datadir}/radmin-linux/install.sh /path/to/radmin-linux-base.qcow2.zst
 echo "then launch it from the menu, or run: radmin-linux"
 
 %changelog
+* Tue Nov 24 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.3.0-1
+- Own Radmin identity per install, agent API, lighter VM, safer installer
+
 * Wed Sep 02 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.1.0-1
 - First packaged release

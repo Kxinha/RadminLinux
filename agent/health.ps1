@@ -11,6 +11,7 @@ $ISO_MAC = "525400260002"
 function Log($m){ $ts=Get-Date -Format "HH:mm:ss"; Add-Content $LOG "[$ts] $m" }
 function J($s){ if($null -eq $s){'null'}else{'"'+(([string]$s).Replace('\','\\').Replace('"','\"'))+'"'} }
 
+if((Get-Item $LOG).Length -gt 200KB){ Remove-Item $LOG -Force }
 $checks = @()   # each item: name, ok, detail, healed
 function Check($name, $ok, $detail, $healed){
   $script:checks += @{ name=$name; ok=$ok; detail=$detail; healed=$healed }
@@ -108,8 +109,35 @@ if(-not $powerOk -and $Heal){
 Check "power_guard" $powerOk "hibernate off" $powerHealed
 
 # --- 6. agent tasks registered ---
-$t = schtasks /query /tn "RadminAgent-Net" 2>$null
-Check "agent_tasks" ([bool]$t) "RadminAgent-Net" $false
+$t = schtasks /query /tn "RadminAgent-Boot" 2>$null
+Check "agent_tasks" ([bool]$t) "RadminAgent-Boot" $false
+
+# --- 7. API for the Linux app (api.ps1, port 47950) ---
+function ApiUp {
+  $c = New-Object System.Net.Sockets.TcpClient
+  try { $c.Connect("127.0.0.1", 47950); return $c.Connected } catch { return $false } finally { $c.Close() }
+}
+$apiOk = ApiUp
+$apiHealed = $false
+if(-not $apiOk -and $Heal){
+  Log "healing: start RadminAgent-Api"
+  schtasks /run /tn "RadminAgent-Api" 2>$null | Out-Null
+  Start-Sleep 6
+  $apiOk = ApiUp; $apiHealed = $apiOk
+}
+Check "api" $apiOk "port 47950" $apiHealed
+
+# --- 8. firewall on (inbound only from the Linux host) ---
+$fw = (netsh advfirewall show publicprofile state) -join " "
+$fwOk = ($fw -match "State\s+ON")
+$fwHealed = $false
+if(-not $fwOk -and $Heal){
+  Log "healing: firewall"
+  & powershell -NoProfile -ExecutionPolicy Bypass -File "C:\radmin-agent\harden.ps1" | Out-Null
+  $fw = (netsh advfirewall show publicprofile state) -join " "
+  $fwOk = ($fw -match "State\s+ON"); $fwHealed = $fwOk
+}
+Check "firewall" $fwOk "inbound only from the host" $fwHealed
 
 # build JSON
 $allOk = $true

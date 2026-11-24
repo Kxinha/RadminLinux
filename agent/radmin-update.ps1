@@ -20,7 +20,10 @@ function InstalledVer {
 function DiscoverLatest {
   [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls
   try {
-    $html = (New-Object System.Net.WebClient).DownloadString($PAGE)
+    $html = $null
+    for($try = 1; $try -le 3 -and -not $html; $try++){
+      try { $html = (New-Object System.Net.WebClient).DownloadString($PAGE) } catch { if($try -eq 3){ throw }; Start-Sleep 5 }
+    }
   } catch { Log "failed to download page: $($_.Exception.Message)"; return $null }
   $mm = [regex]::Matches($html, "Radmin_VPN_([\d\.]+)\.exe")
   if($mm.Count -eq 0){ Log "no version on the page"; return $null }
@@ -47,16 +50,43 @@ if($cur -and $lat){
 }
 Log "installed=$cur latest=$lat new=$hasNew"
 
+# Radmin 2.1+ installers need SHA-2 code signing support, which Windows 7 only
+# has with update KB4474419. Without it the installer aborts, so say why.
+$blocked = ""
+if($hasNew){
+  $os = Get-WmiObject Win32_OperatingSystem
+  $isWin7 = ([string]$os.Version).StartsWith("6.1")
+  $sha2 = [bool](Get-WmiObject Win32_QuickFixEngineering -Filter "HotFixID='KB4474419'")
+  try { $needs = ([version]$lat -ge [version]"2.1") } catch { $needs = $false }
+  if($isWin7 -and $needs -and -not $sha2){
+    $blocked = "Radmin $lat needs the Windows 7 SHA-2 update (KB4474419), which this VM does not have. Radmin $cur keeps working."
+    Log $blocked
+  }
+}
+
 $installed = $false
 $err = ""
-if($hasNew -and -not $CheckOnly -and $url){
+if($hasNew -and -not $CheckOnly -and $url -and -not $blocked){
   $tmp = "C:\radmin-agent\Radmin_update.exe"
   try {
     Log "downloading $url"
-    (New-Object System.Net.WebClient).DownloadFile($url, $tmp)
-    if(Test-Path $tmp){
+    for($try = 1; $try -le 3; $try++){
+      try { (New-Object System.Net.WebClient).DownloadFile($url, $tmp); break }
+      catch { Log "download try $try failed: $($_.Exception.Message)"; if($try -eq 3){ throw }; Start-Sleep 5 }
+    }
+    $sig = Get-AuthenticodeSignature $tmp
+    $signer = ""
+    if($sig.SignerCertificate){ $signer = $sig.SignerCertificate.Subject }
+    Log "signature: $($sig.Status) $signer"
+    if($signer -notmatch "Famatech"){
+      $err = "installer is not signed by Famatech ($($sig.Status)); not installing"
+      Log $err
+      Remove-Item $tmp -Force
+    }
+    if((Test-Path $tmp) -and -not $err){
       Log "installing silently"
-      $p = Start-Process $tmp -ArgumentList "/S" -Wait -PassThru
+      # Radmin's installer is Inno Setup: /S is ignored, it needs /VERYSILENT
+      $p = Start-Process $tmp -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
       $installed = ($p.ExitCode -eq 0)
       Remove-Item $tmp -Force
       Log "installed=$installed exit=$($p.ExitCode)"
@@ -64,7 +94,7 @@ if($hasNew -and -not $CheckOnly -and $url){
   } catch { $err = $_.Exception.Message; Log "install error: $err" }
 }
 
-function J($s){ if($null -eq $s){'null'}else{'"'+([string]$s)+'"'} }
+function J($s){ if($null -eq $s){'null'}else{'"'+(([string]$s).Replace('\','\\').Replace('"','\"'))+'"'} }
 Write-Output "<<<UPD>>>"
-Write-Output ('{"installed_version":' + (J $cur) + ',"latest_version":' + (J $lat) + ',"download_url":' + (J $url) + ',"has_update":' + $hasNew.ToString().ToLower() + ',"did_install":' + $installed.ToString().ToLower() + ',"error":' + (J $err) + '}')
+Write-Output ('{"installed_version":' + (J $cur) + ',"latest_version":' + (J $lat) + ',"download_url":' + (J $url) + ',"has_update":' + $hasNew.ToString().ToLower() + ',"did_install":' + $installed.ToString().ToLower() + ',"blocked":' + (J $blocked) + ',"error":' + (J $err) + '}')
 Write-Output "<<<END>>>"

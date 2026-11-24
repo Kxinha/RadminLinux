@@ -1,7 +1,7 @@
 """
 vmctl.py - controls the whole VM from the Linux side (not Radmin, the machine).
-For the user of the fake UI, "turn Radmin Linux on/off" = turn the VM on/off.
-Uses the QEMU monitor (socket) and the bench scripts.
+For the user, "turn Radmin Linux on/off" = turn the VM on/off.
+Uses the QEMU monitor (socket), the pidfile and preflight.sh.
 """
 from __future__ import annotations
 import os, socket, subprocess, time, signal
@@ -14,14 +14,21 @@ RUN = config.RUN_SCRIPT
 PREFLIGHT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "preflight.sh")
 
 
-def is_running() -> bool:
+def _pid() -> int | None:
+    """PID of OUR qemu (pidfile checked against /proc, so a stale pidfile whose
+    number was reused by another program does not count)."""
     try:
         with open(PIDFILE) as f:
             pid = int(f.read().strip())
-        os.kill(pid, 0)
-        return True
-    except (OSError, ValueError, FileNotFoundError):
-        return False
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = f.read()
+        return pid if b"qemu" in cmd else None
+    except (OSError, ValueError):
+        return None
+
+
+def is_running() -> bool:
+    return _pid() is not None
 
 
 def _monitor(cmd: str, timeout: float = 8) -> str:
@@ -48,10 +55,8 @@ def power_off(timeout: int = 60) -> bool:
     if not is_running():
         return True
     _monitor("system_powerdown")
-    try:
-        with open(PIDFILE) as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError):
+    pid = _pid()
+    if pid is None:
         return True
     for _ in range(timeout):
         try:
@@ -67,10 +72,8 @@ def power_off_hard() -> bool:
     orderly way and flushes its block cache), escalating to SIGKILL only if it
     refuses to exit. NEVER start with kill -9: it dumps GBs of dirty pages at once
     and freezes the host."""
-    try:
-        with open(PIDFILE) as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError, FileNotFoundError):
+    pid = _pid()
+    if pid is None:
         return True
     try:
         os.kill(pid, signal.SIGTERM)
@@ -105,20 +108,16 @@ def power_on() -> bool:
 
 
 def is_responsive(timeout: float = 3) -> bool:
-    """Does the VM answer on the network? (ICMP to the VM host, PROCESS-FREE).
-    Uses the unprivileged-ICMP sweep so it never spawns a ping process nor blocks
-    the UI thread on a subprocess."""
-    host = HOST_IP()
+    """Does the VM answer? Agent API first, then ICMP (process-free socket), so
+    a VM whose agent is still starting is not taken for a hung one."""
+    import backend
+    if backend.api_version(timeout=timeout) is not None:
+        return True
     try:
         import actions
-        return bool(actions.ping_sweep([host]).get(host, False))
+        return bool(actions.ping_sweep([config.HOST]).get(config.HOST, False))
     except Exception:  # noqa
         return False
-
-
-def HOST_IP() -> str:
-    import config
-    return config.HOST
 
 
 def recover() -> str:

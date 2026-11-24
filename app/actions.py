@@ -1,14 +1,16 @@
 """
 actions.py - write actions (phase 3/4) and active liveness.
-- connect/disconnect: stops/starts RvControlSvc (the mesh's real power switch).
-- leave_network: removes the network association (Networks {GUID} key).
+- connect/disconnect: starts/stops RvControlSvc (the mesh's real power switch).
+- rename_node, leave_network, reset_identity, show_gui.
 - ping_sweep: measures online/offline straight from Linux (we have a route to 26.0.0.0/8).
-Short commands go via -EncodedCommand; the heavy status stays in the shim.
+Every action goes to the in-VM agent API first (instant) and falls back to WMI
+for old agents.
 """
 from __future__ import annotations
-import base64, concurrent.futures, ipaddress
-import socket, struct, os, select, time, threading
-import backend  # reuses TARGET/WMIEXEC + the killable-subprocess registry
+import concurrent.futures, ipaddress, re
+import socket, struct, select, time, threading
+import backend  # API client + WMI fallback + the killable-subprocess registry
+import config
 
 REGBASE = r"HKLM:\SOFTWARE\Wow6432Node\Famatech\RadminVPN\1.0"
 
@@ -26,24 +28,30 @@ _ICMP_ECHO = 8
 
 
 def _run_ps(script: str, timeout: int = 60) -> tuple[bool, str]:
-    """Run a PowerShell block on the VM via EncodedCommand (no escaping)."""
-    b64 = base64.b64encode(script.encode("utf-16-le")).decode()
-    cmd = (
-        f"{backend.WMIEXEC} -shell-type powershell {backend.TARGET} "
-        f'"powershell -EncodedCommand {b64}"'
-    )
-    rc, blob = backend.run_capture(cmd, timeout, shell=True)
+    """WMI fallback: run a PowerShell block on the VM (old agents without the API)."""
+    rc, blob = backend.wmi_ps(script, timeout)
     if rc == 124:
         return False, "timeout"
     if rc == 255:
-        return False, blob or "cancelado"
+        return False, blob or "cancelled"
     return ("<<<ACTOK>>>" in blob), blob
 
 
+def _api_act(path: str, params: dict | None = None, timeout: float = 45) -> tuple[bool, str] | None:
+    """POST an action to the agent API. None = API not reachable (use WMI)."""
+    d = backend.api(path, "POST", params, timeout=timeout)
+    if d is None:
+        return None
+    return bool(d.get("ok")), str(d.get("msg", ""))
+
+
 def connect(timeout: int = 60) -> tuple[bool, str]:
+    r = _api_act("/connect", timeout=timeout)
+    if r is not None:
+        return r
     ps = (
         f'Set-ItemProperty "{REGBASE}" -Name PowerOn -Value 1 -Type DWord;'
-        'net start RvControlSvc 2>&1 | Out-Null;'
+        'Start-Service RvControlSvc;'
         'Start-Sleep 3;'
         'if((Get-Service RvControlSvc).Status -eq "Running"){Write-Output "<<<ACTOK>>>"}'
     )
@@ -51,9 +59,12 @@ def connect(timeout: int = 60) -> tuple[bool, str]:
 
 
 def disconnect(timeout: int = 60) -> tuple[bool, str]:
+    r = _api_act("/disconnect", timeout=timeout)
+    if r is not None:
+        return r
     ps = (
         f'Set-ItemProperty "{REGBASE}" -Name PowerOn -Value 0 -Type DWord;'
-        'net stop RvControlSvc 2>&1 | Out-Null;'
+        'Stop-Service RvControlSvc -Force;'
         'Start-Sleep 2;'
         'if((Get-Service RvControlSvc).Status -eq "Stopped"){Write-Output "<<<ACTOK>>>"}'
     )
@@ -63,25 +74,63 @@ def disconnect(timeout: int = 60) -> tuple[bool, str]:
 def rename_node(new_name: str, timeout: int = 60) -> tuple[bool, str]:
     """Change the node's name (Alias) that other peers see. Persists in the registry
     and restarts the service to re-announce to the mesh."""
-    safe = new_name.replace('"', "").replace("'", "").strip()[:63]
+    safe = new_name.replace('"', "").replace("'", "").replace("`", "").replace("$", "").strip()[:63]
+    if not safe:
+        return False, "empty name"
+    r = _api_act("/rename", {"name": safe}, timeout=timeout)
+    if r is not None:
+        return r
     ps = (
-        f'Set-ItemProperty "{REGBASE}" -Name Alias -Value "{safe}" -Type String;'
+        f'Set-ItemProperty "{REGBASE}" -Name Alias -Value \'{safe}\' -Type String;'
         'Restart-Service RvControlSvc -Force;'
         'Start-Sleep 3;'
-        f'if((Get-ItemProperty "{REGBASE}").Alias -eq "{safe}"){{Write-Output "<<<ACTOK>>>"}}'
+        f'if((Get-ItemProperty "{REGBASE}").Alias -eq \'{safe}\'){{Write-Output "<<<ACTOK>>>"}}'
     )
     return _run_ps(ps, timeout)
+
+
+_GUID_RE = re.compile(r"^\{[0-9A-Fa-f-]{36}\}$")
 
 
 def leave_network(guid: str, timeout: int = 60) -> tuple[bool, str]:
     """Remove the network association (leave the network). guid includes the {} braces."""
+    if not _GUID_RE.match(guid or ""):
+        return False, "bad network id"
+    r = _api_act("/leave", {"guid": guid}, timeout=timeout)
+    if r is not None:
+        return r
     ps = (
         f'$k="{REGBASE}\\Networks\\{guid}";'
         'if(Test-Path $k){Remove-Item $k -Recurse -Force;'
         'Restart-Service RvControlSvc -Force;'
-        'Write-Output "<<<ACTOK>>>"}else{Write-Output "nao-existe"}'
+        'Write-Output "<<<ACTOK>>>"}else{Write-Output "not-a-member"}'
     )
     return _run_ps(ps, timeout)
+
+
+def reset_identity(timeout: int = 120) -> tuple[bool, str]:
+    """Give this VM a brand new Radmin node (new id, new 26.x IP, no networks)."""
+    r = _api_act("/reset-identity", timeout=timeout)
+    if r is not None:
+        return r
+    rc, blob = backend.wmi_cmd(
+        "powershell -NoProfile -NonInteractive -InputFormat None -ExecutionPolicy Bypass "
+        rf"-File {config.AGENT_DIR}\identity.ps1 -Reset < NUL", timeout)
+    return ("<<<ACTOK>>>" in blob), blob
+
+
+def show_gui(timeout: int = 20) -> tuple[bool, str]:
+    """Bring the Radmin window to the front of the VM screen (before opening VNC)."""
+    r = _api_act("/show-gui", timeout=timeout)
+    if r is not None:
+        return r
+    rc, blob = backend.wmi_cmd('schtasks /run /tn "RadminAgent-ShowGui"', timeout)
+    return rc == 0, blob
+
+
+def ack_identity() -> None:
+    """Forget the 'identity was reset' notice once the user saw it."""
+    backend.api("/ack-identity", "POST", timeout=5)
 
 
 def _valid_targets(ips: list[str]) -> list[str]:

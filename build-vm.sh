@@ -3,14 +3,17 @@
 #  build-vm.sh - produces the distributable base image of Radmin-Linux.
 #
 #  Two modes:
-#   --clean IMG.qcow2   starts from an ALREADY-ready image (with Windows+Radmin+agent)
-#                       and CLEANS it for distribution: leaves the current network,
-#                       resets the Alias, deletes logs/roster/dump, compresses. (fast)
-#   --from-scratch      provisions from zero: installs unattended POSReady7,
-#                       Radmin, ICS and the agent. (long; requires the ISOs)
+#   --clean SRC.qcow2   makes a release image from a ready VM (Windows + Radmin).
+#                       SRC is NEVER modified: a throwaway overlay of it boots
+#                       WITHOUT internet (so Radmin cannot talk to its servers),
+#                       gets the current agent, runs provision/release-clean.ps1
+#                       (new identity, no networks, no browser, logs, caches,
+#                       neutral computer name, zeroed free space) and is frozen
+#                       into dist/: qcow2.zst split in <2 GB parts + SHA256SUMS.
+#   --from-scratch ISO  provisions from zero (long; needs the Windows ISO).
 #
-#  The point of --clean: the VM here is logged into your friends' network.
-#  Before copying/distributing, THIS is the step that takes you out of their network.
+#  Before 0.3.0 --clean only removed the network list and kept the node id,
+#  so the Radmin server sent the builder's networks to every download.
 # ============================================================
 set -uo pipefail
 SELF="$(cd "$(dirname "$0")" && pwd)"
@@ -20,67 +23,167 @@ ok(){  printf '   \033[1;32m[ok]\033[0m %s\n' "$*"; }
 die(){ printf '   \033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 
 MODE="${1:-}"; shift || true
+DIST="${RADMIN_DIST:-$SELF/dist}"
+IMG_NAME="radmin-linux-base.qcow2"
 
-clean_running_vm() {
-  # deploy the latest shim and agent scripts into the VM before freezing
-  say "Deploying latest shim and agent scripts into the VM"
-  "$SELF/deploy-shim.sh" >/dev/null && "$SELF/deploy-agent.sh" >/dev/null || die "failed to deploy shim/agent"
+real_disk() {   # refuse tmpfs (RAM) for multi-GB files, check free space
+  mkdir -p "$1"
+  local t; t=$(stat -f -c %T "$1" 2>/dev/null)
+  [[ "$t" == tmpfs || "$t" == ramfs ]] && die "$1 is on $t (RAM); use a folder on a real disk"
+  local gb; gb=$(df -BG --output=avail "$1" | tail -1 | tr -dc '0-9')
+  [[ -n "$gb" && "$gb" -lt "$2" ]] && die "only ${gb} GB free in $1, need ${2} GB"
+  return 0
+}
 
-  # run the cleanup steps INSIDE the VM (powered on), via WMI
-  say "Cleaning the Radmin state in the VM (leaving the network, resetting identity, locking password)"
-  local ps
-  ps=$(cat <<'PSEOF'
-$ErrorActionPreference="SilentlyContinue"
-# 0. ensure password never expires and tasks/power-guard are up to date
-net accounts /maxpwage:unlimited | Out-Null
-wmic useraccount where "name='bench'" set PasswordExpires=FALSE 2>$null | Out-Null
-& powershell -ExecutionPolicy Bypass -File "C:\radmin-agent\agent-install.ps1" | Out-Null
-& powershell -ExecutionPolicy Bypass -File "C:\radmin-agent\power-guard.ps1" | Out-Null
-# 1. leave ALL networks (remove the associations)
-$net="HKLM:\SOFTWARE\Wow6432Node\Famatech\RadminVPN\1.0\Networks"
-if(Test-Path $net){ Get-ChildItem $net | ForEach-Object { Remove-Item $_.PSPath -Recurse -Force } }
-# 2. reset identity (Alias, RID cache) for the next owner to set their own
-$b="HKLM:\SOFTWARE\Wow6432Node\Famatech\RadminVPN\1.0"
-Set-ItemProperty $b -Name Alias -Value "RADMIN-LINUX" -Type String
-Set-ItemProperty $b -Name PowerOn -Value 1 -Type DWord
-# 3. clean agent logs/dumps and chat
-Remove-Item C:\radmin-agent\*.log -Force -EA SilentlyContinue
-Remove-Item C:\radmin-agent\*.dmp -Force -EA SilentlyContinue
-Remove-Item "C:\Program Files (x86)\Radmin VPN\CHATLOGS\*" -Recurse -Force -EA SilentlyContinue
-Restart-Service RvControlSvc -Force
-Write-Output "<<<CLEANOK>>>"
-PSEOF
-)
-  local b64; b64=$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)
-  "$RADMIN_VENV/bin/python" "$RADMIN_VENV/bin/wmiexec.py" -shell-type powershell \
-    "$RADMIN_TARGET" "powershell -EncodedCommand $b64" 2>&1 | grep -q CLEANOK \
-    && ok "network removed, identity reset, and password locked" || die "failed to clean via WMI"
+package_image() {   # package_image QCOW2 -> zst parts + SHA256SUMS in $DIST
+  local img="$1"
+  mkdir -p "$DIST"
+  say "Compressing (zstd -T0 -12 --long=27)"
+  rm -f "$DIST/$IMG_NAME.zst" "$DIST/$IMG_NAME.zst.part-"*
+  zstd -q -T0 -12 --long=27 -f "$img" -o "$DIST/$IMG_NAME.zst" || die "zstd failed"
+  split -b 1900M "$DIST/$IMG_NAME.zst" "$DIST/$IMG_NAME.zst.part-" || die "split failed"
+  rm -f "$DIST/$IMG_NAME.zst"
+  (cd "$DIST" && sha256sum "$IMG_NAME.zst.part-"* > SHA256SUMS)
+  ok "release parts: $(cd "$DIST" && ls "$IMG_NAME.zst.part-"* | tr '\n' ' ')"
+  ok "checksums in $DIST/SHA256SUMS"
 }
 
 case "$MODE" in
   --clean)
-    IMG="${1:-$RADMIN_VMDIR/bench.qcow2}"
-    [[ -f "$IMG" ]] || die "image not found: $IMG"
-    # the VM must be POWERED ON to clean via WMI
-    if ! "$RADMIN_VENV/bin/python" "$SELF/app/vmctl.py" status 2>/dev/null | grep -q running; then
-      die "turn the VM on first (--clean operates on the running VM)"
+    SRC="${1:-$RADMIN_VMDIR/bench.qcow2}"
+    [[ -f "$SRC" ]] || die "image not found: $SRC"
+    SRC="$(readlink -f "$SRC")"
+    BDIR="${RADMIN_BUILD:-$SELF/build}/clean"
+    real_disk "$(dirname "$BDIR")" 30
+    if "$RADMIN_PY" "$SELF/app/vmctl.py" status 2>/dev/null | grep -q running; then
+      die "turn your Radmin VM off first (the build VM needs the $RADMIN_TAP link)"
     fi
-    clean_running_vm
-    say "Powering the VM off to freeze the clean image"
-    "$RADMIN_VENV/bin/python" "$SELF/app/vmctl.py" off >/dev/null
-    sleep 3
-    OUT="${RADMIN_DIST:-$SELF/dist}/radmin-linux-base.qcow2"
-    mkdir -p "$(dirname "$OUT")"
-    say "Compacting the image (qemu-img convert) for distribution"
-    qemu-img convert -O qcow2 "$IMG" "$OUT" || die "failed to convert"
-    SZ=$(du -h "$OUT" | cut -f1)
-    ok "clean base image: $OUT ($SZ)"
-    if command -v zstd >/dev/null; then
-      zstd -q -T0 -10 --long=27 -f "$OUT" -o "$OUT.zst" && ok "compressed: $OUT.zst ($(du -h "$OUT.zst"|cut -f1))"
-      rm -f "$OUT.zst.part-"*
-      split -b 1900M "$OUT.zst" "$OUT.zst.part-" && ok "split into <2 GB release parts: $(ls "$OUT.zst.part-"* | tr '\n' ' ')"
+    ip link show "$RADMIN_TAP" >/dev/null 2>&1 || nmcli con up "$RADMIN_NMCON" >/dev/null 2>&1 \
+      || die "link $RADMIN_TAP missing (run install.sh)"
+    rm -rf "$BDIR"; mkdir -p "$BDIR"
+    say "1/6  Throwaway overlay of $SRC (the source stays untouched)"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$SRC" "$BDIR/work.qcow2" || die "overlay failed"
+
+    say "2/6  Booting it offline (no internet: Radmin cannot register)"
+    ( setsid qemu-system-x86_64 -name radmin-clean -machine q35,accel=kvm,hpet=off \
+        -cpu host,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-time -smp 2 -m 2048 \
+        -drive file="$BDIR/work.qcow2",if=none,id=hd0,format=qcow2,cache=unsafe,discard=unmap,detect-zeroes=unmap \
+        -device ich9-ahci,id=ahci -device ide-hd,drive=hd0,bus=ahci.0,rotation_rate=1 \
+        -boot order=c -device VGA,vgamem_mb=16 \
+        -netdev user,id=n0,restrict=on -device e1000e,netdev=n0 \
+        -netdev tap,id=n1,ifname="$RADMIN_TAP",script=no,downscript=no \
+        -device e1000e,netdev=n1,mac="$RADMIN_ISO_MAC" \
+        -rtc base=localtime -usb -device usb-tablet -display none -vnc 127.0.0.1:6 \
+        -pidfile "$BDIR/qemu.pid" -monitor unix:"$BDIR/mon.sock",server,nowait \
+        >"$BDIR/qemu.log" 2>&1 < /dev/null & )
+    for i in $(seq 1 15); do [[ -s "$BDIR/qemu.pid" ]] && break; sleep 1; done
+    QPID="$(cat "$BDIR/qemu.pid" 2>/dev/null)"
+    [[ -n "$QPID" ]] || die "build VM did not start: $(cat "$BDIR/qemu.log")"
+    trap '[[ -n "${QPID:-}" ]] && kill "$QPID" 2>/dev/null' EXIT
+    wmi(){ "$RADMIN_PY" "$RADMIN_VENV/bin/wmiexec.py" "$RADMIN_TARGET" "$*" 2>&1; }
+    for i in $(seq 1 60); do wmi "cmd /c echo up" | grep -q '^up' && break; sleep 5; done
+    wmi "cmd /c echo up" | grep -q '^up' || die "the build VM never answered WMI (VNC 127.0.0.1:5906)"
+    ok "Windows up"
+
+    say "3/6  Installing agent $(cat "$SELF/agent/VERSION")"
+    RADMIN_VMDIR="$BDIR" "$RADMIN_PY" "$SELF/app/agent.py" deploy || die "agent install failed"
+
+    say "4/6  Cleaning in two boots (identity, networks, browser, logs, journal, free space)"
+    # what must NOT survive: read it from the VM now, check the frozen image later
+    wmi 'reg query "HKLM\SOFTWARE\Wow6432Node\Famatech\RadminVPN\1.0" /s' | "$RADMIN_PY" -c '
+import re, sys
+t = sys.stdin.read()
+out = set()
+for name, val in re.findall(r"^\s+(RID|IPv4)\s+REG_\w+\s+(\S+)", t, re.M):
+    n = int(val, 16) if val.startswith("0x") else None
+    out.add(str(n) if n is not None else val)
+    if name == "IPv4" and n is not None:   # dword, also look for the dotted form
+        out.add(".".join(str(n >> s & 255) for s in (24, 16, 8, 0)))
+out.update(re.findall(r"\\Networks\\(\{[0-9A-Fa-f-]{36}\})", t))
+print("\n".join(sorted(out)))' > "$BDIR/must-not-leak.txt"
+    OLDNAME="$(wmi 'cmd /c hostname' | tr -d '\r' | grep -vE '^Impacket|^\[|^$' | head -1)"
+    ok "$(wc -l < "$BDIR/must-not-leak.txt") identity strings to check for afterwards"
+    "$RADMIN_PY" - "$SELF/provision/release-clean.ps1" <<PY || die "could not copy the cleaner"
+import io, sys
+from impacket.smbconnection import SMBConnection
+u, p = "$RADMIN_CRED".split(":", 1)
+c = SMBConnection("$RADMIN_HOST", "$RADMIN_HOST", timeout=60); c.login(u, p)
+c.putFile("C\$", "\\\\radmin-agent\\\\release-clean.ps1", io.BytesIO(open(sys.argv[1], "rb").read()).read)
+c.close()
+PY
+    clean_stage(){
+      local o; o="$(timeout 2400 "$RADMIN_PY" "$RADMIN_VENV/bin/wmiexec.py" "$RADMIN_TARGET" \
+        "powershell -NoProfile -NonInteractive -InputFormat None -ExecutionPolicy Bypass -File C:\\radmin-agent\\release-clean.ps1 -Stage $1 < NUL" 2>&1)"
+      echo "$o" | grep -vE '^Impacket|^\[\*\]|^$|CLEANOK' | sed 's/^/     /'
+      echo "$o" | grep -q CLEANOK
+    }
+    clean_stage 1 || die "cleaning stage 1 did not finish"
+    say "     rebooting (new computer name, compact registry)"
+    wmi 'cmd /c shutdown /r /t 0 /f' >/dev/null
+    sleep 20
+    for i in $(seq 1 60); do wmi "cmd /c echo up" | grep -q '^up' && break; sleep 5; done
+    wmi "cmd /c echo up" | grep -q '^up' || die "the build VM did not come back after the reboot"
+    sleep 20
+    clean_stage 2 || die "cleaning stage 2 did not finish"
+    wmi 'cmd /c del /f /q C:\radmin-agent\release-clean.ps1' >/dev/null
+
+    say "5/6  Powering off"
+    wmi 'cmd /c shutdown /s /t 0 /f' >/dev/null
+    for i in $(seq 1 90); do kill -0 "$QPID" 2>/dev/null || break; sleep 2; done
+    kill -0 "$QPID" 2>/dev/null && { kill "$QPID"; sleep 3; }
+    trap - EXIT
+
+    say "6/6  Freezing the image"
+    qemu-img convert -O qcow2 "$BDIR/work.qcow2" "$BDIR/$IMG_NAME" || die "convert failed"
+    ok "image: $(du -h "$BDIR/$IMG_NAME" | cut -f1) on disk"
+    say "     checking the image for the old identity"
+    "$RADMIN_PY" - "$BDIR/$IMG_NAME" "$BDIR/must-not-leak.txt" <<'PY' || die "the image still contains identity data (see above); not packaged"
+import collections, mmap, re, sys
+pats = [l.strip() for l in open(sys.argv[2]) if l.strip()]
+with open(sys.argv[1], "r+b") as f:
+    m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE)
+    for p in pats:
+        for enc in ("latin1", "utf-16-le"):
+            b = p.encode(enc)
+            if "." in p:
+                rs = "0.0.0.0".encode(enc)
+                rep = rs + b"\x00" * (len(b) - len(rs))
+            elif p.startswith("{") and p.endswith("}"):
+                rep = "{00000000-0000-0000-0000-000000000000}".encode(enc)
+            else:
+                rep = b"0" * len(b)
+            for x in re.finditer(re.escape(b), m, re.I):
+                pos = x.start()
+                m[pos:pos+len(b)] = rep
+    m.flush()
+    m.close()
+f = open(sys.argv[1], "rb")
+m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+alts = {}
+for p in pats:
+    for enc in ("latin1", "utf-16-le"):
+        alts[p.encode(enc).lower()] = f"{p[:4]}... ({enc})"
+rx = re.compile(b"|".join(re.escape(a) for a in sorted(alts, key=len, reverse=True)), re.I)
+hits = collections.Counter(alts[x.group().lower()] for x in rx.finditer(m))
+for k, n in hits.items():
+    print(f"   leak: {k} x{n}")
+bad = sum(hits.values())
+print(f"   {len(pats)} strings checked, {bad} hits")
+sys.exit(1 if bad else 0)
+PY
+    rm -f "$BDIR/must-not-leak.txt"
+    if [[ -n "$OLDNAME" ]]; then
+      "$RADMIN_PY" - "$BDIR/$IMG_NAME" "$OLDNAME" <<'PY'
+import mmap, re, sys
+f = open(sys.argv[1], "rb")
+m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+n = sum(len(re.findall(re.escape(sys.argv[2].encode(e)), m, re.I)) for e in ("latin1", "utf-16-le"))
+print(f"   old computer name still in Windows internals: {n} places (not identity data)")
+PY
     fi
-    say "Ready to distribute. Install with: ./install.sh $OUT.zst"
+    package_image "$BDIR/$IMG_NAME"
+    rm -f "$BDIR/work.qcow2"
+    say "Done. Test it before publishing: ./install.sh $BDIR/$IMG_NAME"
     ;;
   --from-scratch)
     # provision the VM from ZERO: unattended POSReady7 -> Radmin -> ICS -> agent.
@@ -110,7 +213,7 @@ case "$MODE" in
     say "2/6  Building the media (setup-guest + agent)"
     cp "$SELF/provision/setup-guest.ps1" "$BDIR/media/"
     cp "$SELF/provision/SetupComplete.cmd" "$BDIR/media/"
-    cp "$SELF/agent/"*.ps1 "$BDIR/media/agent/"
+    cp "$SELF/agent/"*.ps1 "$SELF/agent/"*.vbs "$SELF/agent/VERSION" "$BDIR/media/agent/"
     xorriso -as mkisofs -J -r -V PROVISION -o "$BDIR/provision.iso" "$BDIR/media" 2>/dev/null || die "ISO failed"
 
     say "3/6  Answer floppy (autounattend)"
@@ -159,18 +262,15 @@ case "$MODE" in
 
     OUT="${RADMIN_DIST:-$SELF/dist}/radmin-linux-base.qcow2"
     mkdir -p "$(dirname "$OUT")"
-    qemu-img convert -O qcow2 -c "$DISK" "$OUT" && ok "base image: $OUT ($(du -h "$OUT"|cut -f1))"
-    command -v zstd >/dev/null && zstd -q -19 -f "$OUT" -o "$OUT.zst" && ok "compressed: $OUT.zst ($(du -h "$OUT.zst"|cut -f1))"
-    say "Install with: ./install.sh $OUT.zst"
+    qemu-img convert -O qcow2 "$DISK" "$OUT" && ok "base image: $OUT ($(du -h "$OUT"|cut -f1))"
+    say "Next: ./build-vm.sh --clean $OUT  (adds the agent, cleans, packages)"
     ;;
   *)
     cat <<USAGE
 usage:
-  ./build-vm.sh --clean [IMG.qcow2]   cleans the VM (leaves the network, resets identity,
-                                      compresses) -> dist/radmin-linux-base.qcow2[.zst]
-  ./build-vm.sh --from-scratch        provisions from zero
-
-IMPORTANT: --clean is the step that takes you out of your friends' network before copying.
+  ./build-vm.sh --clean [SRC.qcow2]   release image from a ready VM (SRC is not modified)
+                                      -> build/clean/radmin-linux-base.qcow2 + dist/ parts
+  ./build-vm.sh --from-scratch ISO    provisions Windows + Radmin from zero
 USAGE
     ;;
 esac

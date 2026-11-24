@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
 # ============================================================
-#  install.sh - plug-and-play installer for Radmin-Linux.
-#  Sets up the whole stack on a clean target:
-#    1. checks KVM (every kernel has it)
-#    2. checks/installs system dependencies (qemu, dnsmasq, ...)
-#    3. creates the venv (impacket + PySide6)
-#    4. installs the code into ~/.local/share/radmin-linux
-#    5. imports the VM image
-#    6. creates the isolated interface (NM) + DHCP (systemd)
-#    7. writes config.env
-#    8. creates the .desktop shortcut (the UI does the rest)
-#  After this the user just opens "Radmin VPN" from the menu. No VM to touch.
+#  install.sh - installs Radmin-Linux for the current user.
+#
+#    ./install.sh [image.qcow2 | image.qcow2.zst]
+#
+#   1. checks KVM and /dev/kvm access
+#   2. installs the missing system packages (ONE pkexec prompt)
+#   3. Python venv (impacket + PySide6-Essentials)
+#   4. code into ~/.local/share/radmin-linux
+#   5. VM image (only when given, or when none is installed yet)
+#   6. isolated host<->VM link (NetworkManager tap + route to 26.0.0.0/8)
+#   7. config.env (keeps your per-install id and settings on upgrades)
+#   8. menu entry + icon
+#  Re-running it upgrades the app and keeps your VM image and identity.
+#  Log: ~/.local/share/radmin-linux/install.log
 # ============================================================
 set -uo pipefail
 
 SELF="$(cd "$(dirname "$0")" && pwd)"
-say(){ printf '\033[1;36m>>\033[0m %s\n' "$*"; }
-ok(){  printf '   \033[1;32m[ok]\033[0m %s\n' "$*"; }
-warn(){ printf '   \033[1;33m[!]\033[0m %s\n' "$*"; }
-die(){ printf '   \033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
-
-# install target
+VERSION="$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$SELF/app/config.py")"
 HOME_DIR="${RADMIN_HOME:-$HOME/.local/share/radmin-linux}"
 VMDIR="$HOME_DIR/vm"
 VENV="$HOME_DIR/venv"
@@ -29,149 +27,171 @@ CONF="$CONF_DIR/config.env"
 TAP="${RADMIN_TAP:-tapradmin}"
 NMCON="${RADMIN_NMCON:-radmin-bridge}"
 TAP_IP="${RADMIN_TAP_IP:-192.168.137.2/24}"
-DHCP_SVC="dnsmasq-tapradmin.service"
-
-# the VM image: 1st arg, or a variable, or look next to this script
 VM_IMAGE="${1:-${RADMIN_VM_IMAGE:-}}"
 
+mkdir -p "$HOME_DIR"
+LOG="$HOME_DIR/install.log"
+exec > >(tee -a "$LOG") 2>&1
+echo "=== install $VERSION $(date -Iseconds) ==="
+
+say(){ printf '\033[1;36m>>\033[0m %s\n' "$*"; }
+ok(){  printf '   \033[1;32m[ok]\033[0m %s\n' "$*"; }
+warn(){ printf '   \033[1;33m[!]\033[0m %s\n' "$*"; }
+die(){ printf '   \033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; echo "   log: $LOG" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] && die "run as your normal user, not root (it asks for the password when needed)"
+
 # ---------- 1. KVM ----------
-say "1/8  Checking KVM"
+say "1/8  KVM"
+grep -qE 'vmx|svm' /proc/cpuinfo || die "this CPU has no hardware virtualization (VT-x / AMD-V)"
+ROOT_CMDS=()          # everything that needs root, run in ONE pkexec prompt
 if [[ ! -e /dev/kvm ]]; then
-  warn "/dev/kvm missing. Trying to load the module…"
-  if grep -qi 'vmx' /proc/cpuinfo; then MOD=kvm_intel; else MOD=kvm_amd; fi
-  pkexec modprobe kvm "$MOD" 2>/dev/null || warn "could not load $MOD (enable VT-x/AMD-V in the BIOS)"
+  if grep -q vmx /proc/cpuinfo; then MOD=kvm_intel; else MOD=kvm_amd; fi
+  ROOT_CMDS+=("modprobe $MOD")
 fi
-[[ -e /dev/kvm ]] || die "KVM unavailable. Enable virtualization in the BIOS."
-if [[ -r /dev/kvm && -w /dev/kvm ]]; then ok "/dev/kvm accessible"
-else
-  warn "/dev/kvm not permitted; adding you to the kvm group"
-  pkexec usermod -aG kvm "$USER" && warn "log out/in for the kvm group to take effect"
+if [[ -e /dev/kvm && ! ( -r /dev/kvm && -w /dev/kvm ) ]] || [[ ! -e /dev/kvm ]]; then
+  getent group kvm >/dev/null && ! id -nG | grep -qw kvm && ROOT_CMDS+=("usermod -aG kvm $USER")
 fi
 
-# ---------- 2. system dependencies ----------
-say "2/8  System dependencies"
-# detect the distro family and map package names (they vary a lot)
-PM=""; PKG_QEMU=""; PKG_IMG=""; PKG_DNS=""; PKG_NM=""; PKG_SOCAT=""; PKG_VNC=""; PKG_PY=""
-if command -v dnf >/dev/null; then
-  # Fedora, Nobara, RHEL, ...
-  PM="pkexec dnf install -y"
-  PKG_QEMU=qemu-system-x86-core; PKG_IMG=qemu-img; PKG_DNS=dnsmasq
-  PKG_NM=NetworkManager; PKG_SOCAT=socat; PKG_VNC=tigervnc; PKG_PY="python3 python3-pip"
-elif command -v pacman >/dev/null; then
-  # Arch, Manjaro, EndeavourOS
-  PM="pkexec pacman -S --needed --noconfirm"
-  PKG_QEMU=qemu-desktop; PKG_IMG=qemu-img; PKG_DNS=dnsmasq
-  PKG_NM=networkmanager; PKG_SOCAT=socat; PKG_VNC=tigervnc; PKG_PY=python
+# ---------- 2. system packages ----------
+say "2/8  System packages"
+# command -> package, per family. Only what is missing gets installed.
+#   qemu (x86_64 system emulator + qemu-img), zstd (image), socat (VM monitor),
+#   vncviewer (the Radmin window), nmcli (the link), python3
+if command -v pacman >/dev/null; then
+  FAM=arch;  INST="pacman -S --needed --noconfirm"
+  P_QEMU=qemu-base; P_IMG=qemu-img; P_VNC=tigervnc; P_NM=networkmanager; P_PY=python; P_VENV=""
 elif command -v apt-get >/dev/null; then
-  # Debian, Ubuntu, Mint, Pop!_OS
-  PM="pkexec apt-get install -y"
-  pkexec apt-get update -qq 2>/dev/null || true
-  PKG_QEMU=qemu-system-x86; PKG_IMG=qemu-utils; PKG_DNS=dnsmasq-base
-  PKG_NM=network-manager; PKG_SOCAT=socat; PKG_VNC=tigervnc-viewer; PKG_PY="python3 python3-venv python3-pip"
+  FAM=debian; INST="apt-get install -y --no-install-recommends"
+  P_QEMU=qemu-system-x86; P_IMG=qemu-utils; P_VNC=tigervnc-viewer; P_NM=network-manager; P_PY=python3; P_VENV=python3-venv
+elif command -v dnf >/dev/null; then
+  FAM=fedora; INST="dnf install -y --setopt=install_weak_deps=False"
+  P_QEMU=qemu-system-x86-core; P_IMG=qemu-img; P_VNC=tigervnc; P_NM=NetworkManager; P_PY=python3; P_VENV=""
 elif command -v zypper >/dev/null; then
-  # openSUSE
-  PM="pkexec zypper install -y"
-  PKG_QEMU=qemu-x86; PKG_IMG=qemu-tools; PKG_DNS=dnsmasq
-  PKG_NM=NetworkManager; PKG_SOCAT=socat; PKG_VNC=tigervnc; PKG_PY="python3 python3-pip"
+  FAM=suse;  INST="zypper --non-interactive install --no-recommends"
+  P_QEMU=qemu-x86; P_IMG=qemu-tools; P_VNC=tigervnc; P_NM=NetworkManager; P_PY=python3; P_VENV=""
 else
-  die "package manager not recognized. Install manually: qemu, qemu-img, dnsmasq, NetworkManager, socat, python3"
+  die "package manager not recognized. Install by hand: qemu (x86_64), qemu-img, zstd, socat, a VNC viewer (tigervnc), NetworkManager, python3 with venv"
 fi
-
 need=()
-command -v qemu-system-x86_64 >/dev/null || need+=($PKG_QEMU)
-command -v qemu-img >/dev/null || need+=($PKG_IMG)
-command -v nmcli    >/dev/null || need+=($PKG_NM)
-command -v socat    >/dev/null || need+=($PKG_SOCAT)
-command -v vncviewer >/dev/null || need+=($PKG_VNC)
-command -v python3  >/dev/null || need+=($PKG_PY)
-command -v uv       >/dev/null || warn "uv not found (will use python -m venv)"
+command -v qemu-system-x86_64 >/dev/null || need+=("$P_QEMU")
+command -v qemu-img  >/dev/null || need+=("$P_IMG")
+command -v zstd      >/dev/null || need+=(zstd)
+command -v socat     >/dev/null || need+=(socat)
+command -v vncviewer >/dev/null || need+=("$P_VNC")
+command -v nmcli     >/dev/null || need+=("$P_NM")
+command -v python3   >/dev/null || need+=("$P_PY")
+if [[ -n "$P_VENV" ]] && ! python3 -c "import ensurepip, venv" 2>/dev/null; then need+=("$P_VENV"); fi
+need=($(printf '%s\n' "${need[@]}" | awk '!s[$0]++'))
 if [[ ${#need[@]} -gt 0 ]]; then
-  say "   installing (${PM%% *}...): ${need[*]}"
-  $PM "${need[@]}" || die "failed to install dependencies"
+  say "   missing: ${need[*]}"
+  PRE=""; [[ $FAM == debian ]] && PRE="apt-get update -qq && "
+  ROOT_CMDS=("${PRE}$INST ${need[*]}" "${ROOT_CMDS[@]}")
 fi
-ok "qemu, dnsmasq, NetworkManager, socat present"
+if [[ ${#ROOT_CMDS[@]} -gt 0 ]]; then
+  joined="$(printf '%s && ' "${ROOT_CMDS[@]}")"; joined="${joined% && }"
+  say "   asking for your password once (pkexec) for: ${joined}"
+  pkexec sh -c "$joined" || die "the system step failed (see above)"
+fi
+for c in qemu-system-x86_64 qemu-img zstd socat vncviewer nmcli python3; do
+  command -v "$c" >/dev/null || die "$c is still missing"
+done
+[[ -r /dev/kvm && -w /dev/kvm ]] && ok "/dev/kvm accessible" || \
+  warn "/dev/kvm needs the kvm group: log out and back in once before starting the VM"
 
 # ---------- 3. venv ----------
-say "3/8  Python environment (impacket + PySide6)"
-mkdir -p "$HOME_DIR"
-if command -v uv >/dev/null; then
-  uv venv --python 3.12 "$VENV" >/dev/null 2>&1 || uv venv "$VENV" >/dev/null 2>&1
-  VIRTUAL_ENV="$VENV" uv pip install -q impacket PySide6 >/dev/null 2>&1
+say "3/8  Python environment"
+PYMODS="import impacket, PySide6.QtWidgets"
+if [[ -x "$VENV/bin/python" ]] && "$VENV/bin/python" -c "$PYMODS" 2>/dev/null; then
+  ok "venv already present"
 else
-  python3 -m venv "$VENV"
-  "$VENV/bin/pip" install -q impacket PySide6 >/dev/null 2>&1
+  # PySide6-Essentials = QtCore/Gui/Widgets only (about 1/4 of full PySide6)
+  if command -v uv >/dev/null; then
+    uv venv -q "$VENV" && VIRTUAL_ENV="$VENV" uv pip install -q impacket PySide6-Essentials
+  else
+    python3 -m venv "$VENV" && "$VENV/bin/pip" install -q --disable-pip-version-check impacket PySide6-Essentials
+  fi
+  "$VENV/bin/python" -c "$PYMODS" 2>/dev/null && ok "venv ready" || die "could not create the venv in $VENV"
 fi
-"$VENV/bin/python" -c "import impacket, PySide6" 2>/dev/null && ok "venv ready" || die "failed to set up the venv"
-# make sure wmiexec.py is accessible
-if [[ ! -f "$VENV/bin/wmiexec.py" ]]; then
-  WM=$("$VENV/bin/python" - <<'PY'
-import impacket, os, glob
-base=os.path.dirname(os.path.dirname(impacket.__file__))
-for p in glob.glob(os.path.join(base,'**','wmiexec.py'),recursive=True):
-    print(p); break
-PY
-)
+if [[ ! -e "$VENV/bin/wmiexec.py" ]]; then
+  WM="$(find "$VENV" -name wmiexec.py -path '*examples*' 2>/dev/null | head -1)"
+  [[ -z "$WM" ]] && WM="$(find "$VENV/bin" -name 'wmiexec*' 2>/dev/null | head -1)"
   [[ -n "$WM" ]] && ln -sf "$WM" "$VENV/bin/wmiexec.py"
 fi
+[[ -e "$VENV/bin/wmiexec.py" ]] || die "impacket's wmiexec.py not found in the venv"
 
 # ---------- 4. code ----------
-say "4/8  Installing the code"
-mkdir -p "$HOME_DIR/app"
-cp -r "$SELF/app/"*.py "$HOME_DIR/app/"
+say "4/8  App $VERSION"
+mkdir -p "$HOME_DIR/app" "$HOME_DIR/vm"
+rm -rf "$HOME_DIR/app/"*.py "$HOME_DIR/app/__pycache__" "$HOME_DIR/agent"
+cp "$SELF/app/"*.py "$HOME_DIR/app/"
 cp -r "$SELF/shim" "$SELF/agent" "$HOME_DIR/"
-cp "$SELF/env.sh" "$SELF/preflight.sh" "$SELF/radmin-linux.sh" \
-   "$SELF/deploy-shim.sh" "$SELF/deploy-agent.sh" "$HOME_DIR/"
-chmod +x "$HOME_DIR"/*.sh
+cp "$SELF/env.sh" "$SELF/preflight.sh" "$SELF/radmin-linux.sh" "$SELF/uninstall.sh" \
+   "$SELF/deploy-agent.sh" "$HOME_DIR/"
+rm -f "$HOME_DIR/deploy-shim.sh"
+cp "$SELF/vm/vm-run.sh"  "$VMDIR/bench-run.sh"
+cp "$SELF/vm/vm-view.sh" "$VMDIR/bench-view.sh"
+cp "$SELF/vm/vm-stop.sh" "$VMDIR/bench-stop.sh"
+chmod +x "$HOME_DIR"/*.sh "$VMDIR"/bench-*.sh
+echo "$VERSION" > "$HOME_DIR/VERSION"
 ok "code in $HOME_DIR"
 
 # ---------- 5. VM image ----------
 say "5/8  VM image"
-mkdir -p "$VMDIR"
-if [[ -n "$VM_IMAGE" && -f "$VM_IMAGE" ]]; then
-  say "   importing $VM_IMAGE (may take a while)…"
+IMG="$VMDIR/bench.qcow2"
+NEW_IMAGE=0
+if [[ -n "$VM_IMAGE" ]]; then
+  [[ -f "$VM_IMAGE" ]] || die "image not found: $VM_IMAGE"
+  [[ -f "$IMG" ]] && { mv -f "$IMG" "$IMG.old"; warn "previous image kept as $IMG.old (delete it when the new one works)"; }
+  say "   importing $(basename "$VM_IMAGE")…"
   case "$VM_IMAGE" in
-    *.qcow2) cp "$VM_IMAGE" "$VMDIR/bench.qcow2" ;;
-    *.qcow2.zst) zstd -d -o "$VMDIR/bench.qcow2" "$VM_IMAGE" ;;
-    *.qcow2.gz)  gunzip -c "$VM_IMAGE" > "$VMDIR/bench.qcow2" ;;
-    *) die "image format not recognized: $VM_IMAGE" ;;
-  esac
+    *.qcow2.zst) zstd -d -q --long=31 -o "$IMG.part" "$VM_IMAGE" ;;
+    *.qcow2)     if [[ "${RADMIN_IMAGE_MOVE:-0}" == 1 ]]; then mv "$VM_IMAGE" "$IMG.part"; else cp --sparse=always "$VM_IMAGE" "$IMG.part"; fi ;;
+    *) die "unknown image format: $VM_IMAGE (want .qcow2 or .qcow2.zst)" ;;
+  esac || die "could not import the image (disk full?)"
+  qemu-img check -q "$IMG.part" >/dev/null 2>&1 || die "the image is damaged; download it again"
+  mv "$IMG.part" "$IMG"
+  NEW_IMAGE=1
   ok "image imported"
-elif [[ -f "$VMDIR/bench.qcow2" ]]; then
-  ok "image already present in $VMDIR"
+elif [[ -f "$IMG" ]]; then
+  ok "image already installed (kept)"
 else
-  warn "no VM image. Pass the path: ./install.sh path/bench.qcow2[.zst]"
-  warn "or run ./build-vm.sh to build a clean one from scratch."
+  warn "no VM image yet. Use bootstrap.sh, or: $HOME_DIR/install.sh /path/radmin-linux-base.qcow2.zst"
 fi
-# VM run scripts (parameterized by the config; run with nice/ionice)
-cp "$SELF/vm/vm-run.sh"  "$VMDIR/bench-run.sh"
-cp "$SELF/vm/vm-view.sh" "$VMDIR/bench-view.sh"
-cp "$SELF/vm/vm-stop.sh" "$VMDIR/bench-stop.sh"
-chmod +x "$VMDIR"/bench-*.sh
-# env.sh must be reachable from VMDIR (the scripts source ../env.sh)
-cp "$SELF/env.sh" "$HOME_DIR/env.sh" 2>/dev/null || true
 
-# ---------- 6. isolated network + DHCP ----------
-say "6/8  Isolated interface + route (ICS/NAT)"
-if ! nmcli con show "$NMCON" >/dev/null 2>&1; then
-  nmcli con add type tun con-name "$NMCON" ifname "$TAP" mode tap owner "$(id -u)" \
-    ipv4.method manual ipv4.addresses "$TAP_IP" ipv4.routes "26.0.0.0/8 192.168.137.1" \
-    ipv4.never-default yes ipv6.method disabled \
-    connection.zone trusted connection.autoconnect yes >/dev/null 2>&1 || \
-  pkexec nmcli con add type tun con-name "$NMCON" ifname "$TAP" mode tap owner "$(id -u)" \
-    ipv4.method manual ipv4.addresses "$TAP_IP" ipv4.routes "26.0.0.0/8 192.168.137.1" \
-    ipv4.never-default yes ipv6.method disabled \
-    connection.zone trusted connection.autoconnect yes >/dev/null 2>&1
+# ---------- 6. isolated link ----------
+say "6/8  Host <-> VM link ($TAP)"
+# zone "block": the VM can reach nothing on this PC (replies to our own
+# connections still pass). Before 0.3.0 it was "trusted", which exposed every
+# local service to the VM and, through it, to the Radmin network.
+ZONE=block
+NMARGS=(tun.vnet-hdr yes ipv4.method manual ipv4.addresses "$TAP_IP" ipv4.routes "26.0.0.0/8 192.168.137.1"
+        ipv4.never-default yes ipv4.ignore-auto-dns yes ipv6.method disabled
+        connection.zone "$ZONE" connection.autoconnect yes)
+if nmcli -t -f NAME con show | grep -qx "$NMCON"; then
+  nmcli con mod "$NMCON" "${NMARGS[@]}" 2>/dev/null || pkexec nmcli con mod "$NMCON" "${NMARGS[@]}" \
+    || die "could not update the $NMCON connection"
 else
-  nmcli con mod "$NMCON" ipv4.addresses "$TAP_IP" ipv4.routes "26.0.0.0/8 192.168.137.1" ipv4.never-default yes >/dev/null 2>&1 || true
+  nmcli con add type tun con-name "$NMCON" ifname "$TAP" mode tap owner "$(id -u)" "${NMARGS[@]}" >/dev/null 2>&1 \
+    || pkexec nmcli con add type tun con-name "$NMCON" ifname "$TAP" mode tap owner "$(id -u)" "${NMARGS[@]}" >/dev/null \
+    || die "could not create the $NMCON connection"
 fi
-nmcli con up "$NMCON" >/dev/null 2>&1 || pkexec nmcli con up "$NMCON" >/dev/null 2>&1 || true
-ok "interface $TAP ($TAP_IP, route 26.0.0.0/8 -> 192.168.137.1)"
+if ! ip -4 addr show "$TAP" 2>/dev/null | grep -qF "${TAP_IP%/*}"; then
+  nmcli con up "$NMCON" >/dev/null 2>&1 || true
+fi
+ip link show "$TAP" >/dev/null 2>&1 && ok "$TAP up ($TAP_IP, 26.0.0.0/8 via the VM, zone $ZONE)" \
+  || warn "$TAP not up yet; the app retries when it starts"
 
-# ---------- 7. config.env ----------
+# ---------- 7. config ----------
 say "7/8  Config"
 mkdir -p "$CONF_DIR"
-cat > "$CONF" <<CFG
-# Radmin-Linux - generated by install.sh at $(date -Iseconds)
+keep(){ [[ -f "$CONF" ]] && sed -n "s/^$1=//p" "$CONF" | tail -1; }
+UUID="$(keep RADMIN_VM_UUID)"; [[ -z "$UUID" ]] && UUID="$(cat /proc/sys/kernel/random/uuid)"
+KEEPID="$(keep RADMIN_KEEP_IDENTITY)"; [[ -n "${RADMIN_KEEP_IDENTITY:-}" ]] && KEEPID="$RADMIN_KEEP_IDENTITY"
+RAM="$(keep RADMIN_VM_RAM)"; SMP="$(keep RADMIN_VM_SMP)"; NET="$(keep RADMIN_NET)"
+cat > "$CONF.new" <<CFG
+# Radmin-Linux $VERSION - written by install.sh on $(date -Iseconds)
+# Edit freely; re-running install.sh keeps the last 5 settings.
 RADMIN_HOME=$HOME_DIR
 RADMIN_VMDIR=$VMDIR
 RADMIN_VENV=$VENV
@@ -183,13 +203,19 @@ RADMIN_HOST=192.168.137.1
 RADMIN_CRED=bench:bench
 RADMIN_RUN=$VMDIR/bench-run.sh
 RADMIN_VIEW=$VMDIR/bench-view.sh
+# id of this install: a VM image that sees a different id gets a NEW Radmin identity
+RADMIN_VM_UUID=$UUID
 CFG
+[[ -n "$KEEPID" ]] && echo "RADMIN_KEEP_IDENTITY=$KEEPID" >> "$CONF.new"
+[[ -n "$RAM" ]] && echo "RADMIN_VM_RAM=$RAM" >> "$CONF.new"
+[[ -n "$SMP" ]] && echo "RADMIN_VM_SMP=$SMP" >> "$CONF.new"
+[[ -n "$NET" ]] && echo "RADMIN_NET=$NET" >> "$CONF.new"
+mv "$CONF.new" "$CONF"
 ok "config in $CONF"
 
-# ---------- 8. icons + .desktop shortcut ----------
-say "8/8  Icon and menu shortcut"
+# ---------- 8. menu entry ----------
+say "8/8  Menu entry"
 ICONS="$HOME/.local/share/icons/hicolor"
-# install the icon in each size (WITHOUT creating index.theme; the system's one handles that)
 for sz in 16 22 24 32 48 64 128 256; do
   if [[ -f "$SELF/assets/radmin-linux-$sz.png" ]]; then
     mkdir -p "$ICONS/${sz}x${sz}/apps"
@@ -197,15 +223,18 @@ for sz in 16 22 24 32 48 64 128 256; do
   fi
 done
 gtk-update-icon-cache -q "$ICONS" 2>/dev/null || true
-ok "icon installed in hicolor"
-
 APPS="$HOME/.local/share/applications"
 mkdir -p "$APPS"
 sed "s|^Exec=radmin-linux$|Exec=$HOME_DIR/radmin-linux.sh|" \
     "$SELF/packaging/radmin-linux.desktop" > "$APPS/radmin-linux.desktop"
 update-desktop-database "$APPS" 2>/dev/null || true
-ok "shortcut created (look for 'Radmin VPN' in the menu)"
+mkdir -p "$HOME/.local/bin"
+ln -sf "$HOME_DIR/radmin-linux.sh" "$HOME/.local/bin/radmin-linux"
+ok "'Radmin VPN' is in the menu (or run: radmin-linux)"
 
 echo
-say "Installed. Open 'Radmin VPN' from the menu — the UI does the rest."
-say "Or run it now: $HOME_DIR/radmin-linux.sh"
+say "Radmin-Linux $VERSION installed."
+if [[ $NEW_IMAGE -eq 1 ]]; then
+  say "On the first start the VM gives itself its own Radmin identity, then join your networks with Network > Join a network."
+fi
+say "Uninstall: $HOME_DIR/uninstall.sh"

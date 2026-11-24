@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Radmin VPN (Linux) - a read-only clone of the GUI, fed by the shim in the Windows VM.
-Phase 2: shows the local node, service status and peers (online via ARP, offline via
-roster). Peer nickname is local. Nothing here changes the real Radmin.
+Radmin VPN (Linux) - a native window for the real Radmin VPN that runs headless in a
+small Windows VM. Talks to the agent API inside the VM (instant), WMI only as fallback.
+Shows the node, the service and the peers (online via ARP/ping, offline via roster);
+peer nicknames and network groups are local.
 """
 from __future__ import annotations
 import sys, os, time
@@ -23,9 +24,10 @@ import icons
 import config
 from roster import Roster
 
-POLL_MS = 30000    # full refresh (shim) every 30s
+POLL_MS = 15000    # state refresh (agent API, < 1 s) every 15s
 PING_MS = 30000    # liveness (ping sweep) every 30s
-HEALTH_MS = 120000 # diagnostics + auto-heal every 2 min
+HEALTH_MS = 120000 # watchdog + diagnostics/auto-heal every 2 min
+BOOT_POLL_MS = 4000  # while the VM boots, check this often (cheap: API only)
 MAX_ROWS = 300     # cap on peer rows (never create thousands of widgets)
 # Watchdog (auto-restart a wedged VM) must NEVER fire during a normal boot:
 #  - grace: no watchdog action for this long after a power-on (Windows boots ~1-2 min)
@@ -83,8 +85,12 @@ QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
 class Fetcher(QThread):
     got = Signal(object)
 
+    def __init__(self, allow_wmi=False):
+        super().__init__()
+        self.allow_wmi = allow_wmi
+
     def run(self):
-        self.got.emit(backend.fetch_state())
+        self.got.emit(backend.fetch_state(allow_wmi=self.allow_wmi))
 
 
 class Pinger(QThread):
@@ -100,19 +106,24 @@ class Pinger(QThread):
 
 
 class ActionWorker(QThread):
-    done = Signal(bool, str)
+    # object, not bool/str: some actions return a dict (update check) and a typed
+    # Signal(bool, ...) silently turned it into True.
+    done = Signal(object, object)
 
     def __init__(self, fn):
         super().__init__()
         self.fn = fn
 
     def run(self):
-        ok, log = self.fn()
+        try:
+            ok, log = self.fn()
+        except Exception as e:  # noqa
+            ok, log = False, str(e)
         self.done.emit(ok, log)
 
 
 class HealthWorker(QThread):
-    """Diagnostico + auto-heal em background."""
+    """Diagnostics + auto-heal in the background."""
     done = Signal(object)
 
     def __init__(self, heal):
@@ -121,6 +132,27 @@ class HealthWorker(QThread):
 
     def run(self):
         self.done.emit(agent.health(heal=self.heal))
+
+
+class WatchWorker(QThread):
+    """Watchdog probe off the UI thread: is the VM process alive, does it answer?"""
+    done = Signal(bool, bool)
+
+    def run(self):
+        alive = vmctl.is_running()
+        self.done.emit(alive, vmctl.is_responsive() if alive else False)
+
+
+class EnsureAgentWorker(QThread):
+    """Install/upgrade the in-VM agent when its version differs from this app's."""
+    done = Signal(str)
+
+    def __init__(self, force=False):
+        super().__init__()
+        self.force = force
+
+    def run(self):
+        self.done.emit(agent.ensure_agent(force=self.force, log=lambda m: None))
 
 
 class DiscoverWorker(QThread):
@@ -226,10 +258,13 @@ class MainWindow(QMainWindow):
         self._node_ip = ""
         self._networks = []       # GUIDs of the networks the node is in
         self._selected_net = None  # network selected in the filter (None = all)
-        # Querying the VM (WMI/wmiexec) is OFF by default. An automatic query can
-        # spike CPU/I-O and stutter the whole desktop while the VM is busy, so the
-        # user opts in via System > "Auto-refresh", or queries once with "Refresh now".
-        self._auto = bool(self.roster.get_setting("auto_refresh", False))
+        # Auto-refresh is ON by default now: a query is one tiny HTTP request to the
+        # agent API (it used to be a whole wmiexec login, 10-20 s of CPU, which is
+        # why 0.2 shipped a manual mode). Turn it off in System > Auto-refresh.
+        self._auto = bool(self.roster.get_setting("auto_refresh_v3", True))
+        self._ensure = None
+        self._agent_checked = False   # agent version compared once per VM boot
+        self._identity_seen = ""
         self._build()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
@@ -243,11 +278,14 @@ class MainWindow(QMainWindow):
         # heavy discovery (~200MB dump) only on first run with an empty roster AND
         # only in auto mode; in manual mode nothing queries until the user asks.
         self._want_discover = self._auto and not self.roster.all_ips()
+        self._watch = None
         if self._auto:
             self._start_auto_timers()
             self.refresh()
         else:
             self._show_manual_idle()
+            if self._vm_running:
+                self.refresh()     # one cheap API query; no WMI unless asked
 
     # ---------- auto vs manual querying ----------
     def _start_auto_timers(self):
@@ -286,9 +324,9 @@ class MainWindow(QMainWindow):
 
     def _toggle_auto(self, on: bool):
         self._auto = bool(on)
-        self.roster.set_setting("auto_refresh", self._auto)
+        self.roster.set_setting("auto_refresh_v3", self._auto)
         if self._auto:
-            self.status.setText("● auto-refresh ON — querying the VM every 30s")
+            self.status.setText("● auto-refresh ON")
             self._start_auto_timers()
             self.refresh()
         else:
@@ -307,11 +345,10 @@ class MainWindow(QMainWindow):
         for name in ("System", "Network", "Help"):
             m = QMenu(name, mb)
             if name == "System":
-                a = QAction("Refresh now", self); a.triggered.connect(self.refresh); m.addAction(a)
-                self.actAuto = QAction("Auto-refresh (query VM)", self)
+                a = QAction("Refresh now", self); a.triggered.connect(self.refresh_full); m.addAction(a)
+                self.actAuto = QAction("Auto-refresh", self)
                 self.actAuto.setCheckable(True); self.actAuto.setChecked(self._auto)
-                self.actAuto.setToolTip("Off by default so nothing queries the VM in the "
-                                        "background. Turn on to refresh every 30s.")
+                self.actAuto.setToolTip("Refresh every 15 s (one tiny request to the VM).")
                 self.actAuto.toggled.connect(self._toggle_auto); m.addAction(self.actAuto)
                 m.addSeparator()
                 self.actVmOn = QAction("Turn VM on", self)
@@ -325,8 +362,12 @@ class MainWindow(QMainWindow):
                 au.triggered.connect(self.do_check_update); m.addAction(au)
                 ao = QAction("Repair network (orchestrator)", self)
                 ao.triggered.connect(self.do_orchestrate); m.addAction(ao)
-                ai = QAction("Install/repair agent on VM", self)
+                ai = QAction("Reinstall the VM agent", self)
                 ai.triggered.connect(self.do_install_agent); m.addAction(ai)
+                m.addSeparator()
+                ar = QAction("Reset Radmin identity…", self)
+                ar.setToolTip("New node id and 26.x address, no networks")
+                ar.triggered.connect(self.do_reset_identity); m.addAction(ar)
                 m.addSeparator()
                 q = QAction("Quit", self); q.triggered.connect(QApplication.quit); m.addAction(q)
             elif name == "Network":
@@ -353,6 +394,9 @@ class MainWindow(QMainWindow):
                 self.actJoin.triggered.connect(self.do_join); m.addAction(self.actJoin)
                 self.actCreate = QAction("Create network…", self)
                 self.actCreate.triggered.connect(self.do_create); m.addAction(self.actCreate)
+                m.addSeparator()
+                self.actGui = QAction("Open the Radmin window", self)
+                self.actGui.triggered.connect(self._open_vnc); m.addAction(self.actGui)
             elif name == "Help":
                 a = QAction("About", self); a.triggered.connect(self._about); m.addAction(a)
             mb.addMenu(m)
@@ -438,7 +482,8 @@ class MainWindow(QMainWindow):
         d = QAction("Full diagnostics (repair)", self); d.triggered.connect(self.do_health); menu.addAction(d)
         u = QAction("Check for update", self); u.triggered.connect(self.do_check_update); menu.addAction(u)
         s = QAction("Sync members", self); s.triggered.connect(self.discover_now); menu.addAction(s)
-        r = QAction("Refresh", self); r.triggered.connect(self.refresh); menu.addAction(r)
+        r = QAction("Refresh", self); r.triggered.connect(self.refresh_full); menu.addAction(r)
+        g = QAction("Open the Radmin window", self); g.triggered.connect(self._open_vnc); menu.addAction(g)
         menu.addSeparator()
         quit_ = QAction("Quit", self); quit_.triggered.connect(QApplication.quit); menu.addAction(quit_)
         self.tray.setContextMenu(menu)
@@ -476,15 +521,56 @@ class MainWindow(QMainWindow):
         t.start()
 
     # ---------- data ----------
-    def refresh(self):
+    def refresh(self, allow_wmi=False):
         if self._closing:
             return
         if self._fetcher and self._fetcher.isRunning():
             return
-        self.status.setText("querying the VM…")
-        self._fetcher = Fetcher()
+        if allow_wmi:
+            self.status.setText("querying the VM…")
+        self._fetcher = Fetcher(allow_wmi=allow_wmi)
         self._fetcher.got.connect(self._apply)
         self._start(self._fetcher)
+
+    def refresh_full(self):
+        """Manual refresh: may fall back to WMI (old agent) and re-checks the agent."""
+        self._agent_checked = False
+        self.refresh(allow_wmi=True)
+
+    def _maybe_ensure_agent(self, st):
+        """Once per boot: upgrade the in-VM agent if it is older than this app."""
+        if self._agent_checked or self._closing:
+            return
+        if self._ensure and self._ensure.isRunning():
+            return
+        want = config.agent_version()
+        if st.ok and st.api == want:
+            self._agent_checked = True
+            return
+        self._agent_checked = True
+        self.status.setText("● updating the VM agent…")
+        self._ensure = EnsureAgentWorker()
+        self._ensure.done.connect(self._ensure_done)
+        self._start(self._ensure)
+
+    def _ensure_done(self, res):
+        if self._closing:
+            return
+        self.status.setText({"ok": "● VM agent up to date", "upgraded": "● VM agent updated",
+                             "failed": "● could not update the VM agent (System > Reinstall)"}.get(res, res))
+        QTimer.singleShot(1500, self.refresh)
+
+    def _check_identity_notice(self, st):
+        note = st.identity_reset
+        if not note or note == self._identity_seen or self._closing:
+            return
+        self._identity_seen = note
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "New Radmin identity",
+            "This VM got its own Radmin VPN identity (new node and new 26.x address).\n\n"
+            "Join your networks again with Network > Join a network.\n\n"
+            f"Reason: {note}")
+        actions.ack_identity()
 
     def _apply(self, st: backend.State):
         if self._closing:
@@ -501,6 +587,7 @@ class MainWindow(QMainWindow):
             # qemu alive but WMI still not answering = VM BOOTING (not off)
             self._booting = bool(st.vm_running)
             if not st.vm_running:
+                self._agent_checked = False
                 self.nodeName.setText("VM is off")
                 self.nodeIp.setText("click power to turn on")
                 self.badge.setText("Off")
@@ -516,12 +603,18 @@ class MainWindow(QMainWindow):
             self._sync_actions(False)
             self._update_tray()
             self._clear_list()
-            # while booting, re-check faster so the switch to online feels live
-            # (auto mode only; in manual mode the user refreshes when they want)
-            if self._booting and not self._closing and self._auto:
-                QTimer.singleShot(5000, self.refresh)
+            # while booting, re-check often so the switch to online feels live.
+            # Cheap (one HTTP connect to the VM), so it runs in manual mode too.
+            if self._booting and not self._closing:
+                QTimer.singleShot(BOOT_POLL_MS, self.refresh)
+                # an old agent never brings the API up: upgrade it over WMI
+                if time.monotonic() - self._vm_started_at > 180:
+                    self._maybe_ensure_agent(st)
             return
 
+        self._booting = False
+        self._maybe_ensure_agent(st)
+        self._check_identity_notice(st)
         self._last_service = st.service
         # the name peers see is Radmin's Alias, not the Windows hostname
         self.nodeName.setText(st.alias or st.hostname or "—")
@@ -746,15 +839,23 @@ class MainWindow(QMainWindow):
     def health_now(self):
         if self._closing or self._busy:
             return
+        if self._watch and self._watch.isRunning():
+            return
+        # the probe (pidfile + API/ICMP) runs in a thread: never block the UI
+        self._watch = WatchWorker()
+        self._watch.done.connect(self._watch_result)
+        self._start(self._watch)
+
+    def _watch_result(self, alive, responsive):
         # --- watchdog: restart ONLY a genuinely wedged VM, never during boot ---
-        # A slow Windows boot looks "unresponsive" too, so guard hard: skip while
-        # booting, skip during the post-power-on grace, and require several
-        # consecutive unresponsive cycles before touching the VM. Otherwise the
-        # watchdog kept force-restarting the booting VM in a loop (spurious reboots
-        # + a pile of preflight/wmiexec python + a kill -9 freeze).
-        if vmctl.is_running():
+        # A slow Windows boot looks "unresponsive" too: skip while booting, skip
+        # during the post-power-on grace, and require several consecutive
+        # unresponsive cycles before touching the VM.
+        if self._closing or self._busy:
+            return
+        if alive:
             in_grace = (time.monotonic() - self._vm_started_at) < WATCHDOG_GRACE_S
-            if not self._booting and not in_grace and not vmctl.is_responsive():
+            if not self._booting and not in_grace and not responsive:
                 self._unresponsive_strikes += 1
             else:
                 self._unresponsive_strikes = 0
@@ -768,7 +869,7 @@ class MainWindow(QMainWindow):
                 return
         else:
             self._unresponsive_strikes = 0
-        # normal auto-heal: only when the VM is really up (WMI answering), not booting
+        # normal auto-heal: only when the VM is really up, not booting
         if not self._vm_running or self._booting:
             return
         if self._health and self._health.isRunning():
@@ -814,11 +915,13 @@ class MainWindow(QMainWindow):
             "isolated_ip": "Bridge to Linux",
             "power_guard": "Power locked",
             "agent_tasks": "Boot agent",
+            "api": "Agent API",
+            "firewall": "VM firewall",
         }
         linhas = []
         for c in res.get("checks", []):
             mark = "✓" if c.get("ok") else "✗"
-            extra = "  (reparado)" if c.get("healed") else ""
+            extra = "  (repaired)" if c.get("healed") else ""
             linhas.append(f"{mark}  {nomes.get(c['name'], c['name'])}{extra}")
         titulo = "All systems OK" if res.get("all_ok") else "Problems found"
         m = QMessageBox(self)
@@ -840,6 +943,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "actVmOn"):
             self.actVmOn.setEnabled(not vm and not self._busy)
             self.actVmOff.setEnabled(vm and not self._busy)
+        if hasattr(self, "actGui"):
+            self.actGui.setEnabled(vm)
 
     def _run_action(self, fn, label):
         if self._busy:
@@ -879,6 +984,7 @@ class MainWindow(QMainWindow):
         self.status.setText("● turning VM on…")
         self.nodeName.setText("starting…")
         self._sync_actions(False)
+        self._agent_checked = False
         self._action = ActionWorker(lambda: (vmctl.power_on(), "on"))
         self._action.done.connect(lambda ok, log: self._vm_action_done("Turning on"))
         self._start(self._action)
@@ -904,8 +1010,7 @@ class MainWindow(QMainWindow):
         self._busy = False
         self.status.setText(f"● {label}: ok")
         self._sync_actions(False)
-        # powering on takes ~90s for WMI to answer; the normal 30s refresh recovers,
-        # but fire one early to update the VM state (on/off)
+        # fire one early refresh; while the VM boots _apply keeps polling the API
         QTimer.singleShot(4000, self.refresh)
 
     # ---------- agent / automation ----------
@@ -923,20 +1028,25 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMessageBox
         self._busy = False
         self._sync_actions(self._last_service == "Running")
-        if isinstance(res, tuple):
-            res = res[0]
         if not isinstance(res, dict) or res.get("error"):
             self.status.setText("● update: error")
-            QMessageBox.warning(self, "Update", f"Could not check:\n{res}")
+            err = res.get("error") if isinstance(res, dict) else res
+            QMessageBox.warning(self, "Update", f"Could not check:\n{err}")
             return
         cur = res.get("installed_version", "?")
         lat = res.get("latest_version", "?")
+        if res.get("blocked"):
+            self.status.setText(f"● Radmin {cur} ({lat} needs a Windows update)")
+            QMessageBox.information(self, "Update", res["blocked"])
+            return
         if res.get("has_update"):
             r = QMessageBox.question(self, "Update available",
                 f"Installed: {cur}\nAvailable: {lat}\n\nInstall now on the VM?")
             if r == QMessageBox.Yes:
-                self._run_action(lambda: (agent.check_update(install=True).get("did_install", False), ""),
-                                 "Updating Radmin")
+                def _inst():
+                    r = agent.check_update(install=True)
+                    return bool(r.get("did_install")), str(r.get("error", ""))
+                self._run_action(_inst, "Updating Radmin")
             else:
                 self.status.setText(f"● {cur} ({lat} available)")
         else:
@@ -958,14 +1068,22 @@ class MainWindow(QMainWindow):
         self._run_action(lambda: agent.orchestrate_net(), "Repairing network")
 
     def do_install_agent(self):
+        if not self._vm_running:
+            return
+        self._run_action(lambda: (agent.ensure_agent(force=True, log=lambda m: None) != "failed", ""),
+                         "Reinstalling the VM agent")
+
+    def do_reset_identity(self):
         from PySide6.QtWidgets import QMessageBox
-        def _go():
-            import subprocess, os
-            deploy = os.path.join(os.path.dirname(os.path.dirname(__file__)), "deploy-agent.sh")
-            subprocess.run(["bash", deploy], capture_output=True, timeout=120)
-            out = agent._run_file(r"C:\radmin-agent\agent-install.ps1", 90)
-            return ("<<<AGENTOK>>>" in out), out
-        self._run_action(_go, "Installing agent")
+        if self._busy or not self._vm_running:
+            return
+        r = QMessageBox.question(self, "Reset Radmin identity",
+            "Give this VM a brand new Radmin VPN identity?\n\n"
+            "You get a new node and a new 26.x address and leave ALL networks. "
+            "Peers will see you as a new member, and you must join your networks again.")
+        if r == QMessageBox.Yes:
+            self._identity_seen = ""
+            self._run_action(actions.reset_identity, "Resetting identity")
 
     def do_connect(self):
         self._run_action(actions.connect, "Connecting")
@@ -1020,26 +1138,39 @@ class MainWindow(QMainWindow):
             self._open_vnc()
 
     def _open_vnc(self):
-        import subprocess, config
-        view = config.VIEW_SCRIPT
-        if os.path.exists(view):
-            subprocess.Popen(["bash", view])
-            self.status.setText("● opening VM VNC…")
-            QTimer.singleShot(20000, self.refresh)
+        """Bring the Radmin window to the front inside the VM, then open the viewer."""
+        import subprocess
+        if not self._vm_running:
+            self.status.setText("● turn the VM on first")
             return
-        self.status.setText("● bench-view.sh not found")
+        view = config.VIEW_SCRIPT
+        if not os.path.exists(view):
+            self.status.setText(f"● viewer script not found: {view}")
+            return
+        def _go():
+            actions.show_gui()
+            subprocess.Popen(["bash", view], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            return True, ""
+        w = ActionWorker(_go)
+        w.done.connect(lambda ok, log: self.status.setText("● Radmin window opened"))
+        self._start(w)
+        self.status.setText("● opening the Radmin window…")
+        QTimer.singleShot(20000, self.refresh)
 
     # ---------- misc ----------
     def _about(self):
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.about(self, "About",
-            "Radmin VPN (Linux).\n\n"
-            "Front-end that drives the real Radmin VPN running headless on a\n"
-            "Windows 7 VM, over WMI. The power button turns the whole VM on/off;\n"
+            f"Radmin VPN (Linux) {config.VERSION}\n"
+            f"VM agent {config.agent_version()}\n\n"
+            "Drives the real Radmin VPN running headless in a small\n"
+            "Windows VM. The power button turns the whole VM on/off;\n"
             "peers come live from the mesh; the VM self-heals in the background.\n"
             "Active peers via ARP/ping; nicknames are local.\n\n"
-            f"Small footprint: the VM uses only {config.vm_footprint()}, "
-            "so it never hogs your machine.")
+            f"Footprint: {config.vm_footprint()}.\n\n"
+            "Not affiliated with Famatech. Radmin VPN is their product.")
 
     def _show_raise(self):
         self.showNormal(); self.raise_(); self.activateWindow()

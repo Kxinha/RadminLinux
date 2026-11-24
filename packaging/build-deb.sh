@@ -3,7 +3,7 @@
 # from the GitHub Release). Mirrors the .rpm layout. Needs: dpkg-deb.
 set -euo pipefail
 SELF="$(cd "$(dirname "$0")/.." && pwd)"
-VER="${VER:-0.2.0}"
+VER="${VER:-0.3.0}"
 OUT="${1:-$SELF/packaging/dist}"
 command -v dpkg-deb >/dev/null || { echo "need dpkg-deb (install dpkg)"; exit 1; }
 
@@ -16,7 +16,7 @@ mkdir -p "$PKG/DEBIAN" "$PKG/usr/share/radmin-linux/vm" \
 cp -r "$SELF/app" "$SELF/shim" "$SELF/agent" "$PKG/usr/share/radmin-linux/"
 find "$PKG/usr/share/radmin-linux" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 install -m644 "$SELF/env.sh" "$PKG/usr/share/radmin-linux/"
-install -m755 "$SELF/preflight.sh" "$SELF/radmin-linux.sh" "$SELF/deploy-shim.sh" \
+install -m755 "$SELF/preflight.sh" "$SELF/radmin-linux.sh" "$SELF/uninstall.sh" \
         "$SELF/deploy-agent.sh" "$SELF/install.sh" "$SELF/build-vm.sh" \
         "$PKG/usr/share/radmin-linux/"
 install -m755 "$SELF/vm/"*.sh "$PKG/usr/share/radmin-linux/vm/"
@@ -34,7 +34,7 @@ Version: $VER
 Section: net
 Priority: optional
 Architecture: all
-Depends: qemu-system-x86, qemu-utils, dnsmasq-base, network-manager, socat, python3, python3-venv, python3-pip, policykit-1
+Depends: qemu-system-x86, qemu-utils, zstd, network-manager, socat, python3, python3-venv, python3-pip, policykit-1
 Recommends: tigervnc-viewer
 Maintainer: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
 Homepage: https://github.com/gabrielmf1998/Radmin-Linux-KDE

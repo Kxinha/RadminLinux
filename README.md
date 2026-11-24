@@ -1,221 +1,138 @@
-# Radmin VPN (Linux) — unofficial
+# Radmin VPN on Linux (unofficial)
 
-Run a **Windows-only** app (Radmin VPN) on Linux, looking native, without the user
-ever seeing Windows. A Qt UI drives the **real** Radmin running inside a headless
-Windows 7 VM. See `IDEA.md` for the concept and the sections below for the
-per-component architecture.
+Radmin VPN only exists for Windows. This project runs the **real** Radmin VPN
+inside a tiny headless Windows VM and gives you a native Linux window and tray
+icon for it. Your Linux games and apps reach the Radmin network (26.x.x.x)
+directly; you never have to look at Windows.
 
 ![The Linux client](assets/screenshot.png)
 
-## Install (one command)
+## Install
 
-Works on **any distro** — QEMU/KVM runs on any kernel. This installs the deps, imports
-the VM, sets up the isolated network, and creates the menu shortcut:
+One command, as your normal user (it asks for your password once, for the
+system packages):
 
     curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Radmin-Linux-KDE/main/bootstrap.sh | bash
 
-Prefer a native package? Build one for your package manager:
+Then open **Radmin VPN** from the app menu (or run `radmin-linux`), click the
+power button and use **Network > Join a network**.
 
-| distro | build | install |
-|---|---|---|
-| Fedora / RHEL (.rpm) | `packaging/build-rpm.sh` | `sudo dnf install ./radmin-linux-*.noarch.rpm` |
-| Debian / Ubuntu (.deb) | `packaging/build-deb.sh` | `sudo apt install ./radmin-linux_*.deb` |
-| Arch / Manjaro (PKGBUILD) | `cd packaging && makepkg -si` | (makepkg installs it) |
+* Works on Arch/Manjaro, Debian/Ubuntu/Mint, Fedora and openSUSE.
+* Needs a CPU with virtualization enabled in the BIOS (VT-x / AMD-V), about
+  **12 GB free disk** during the install (9 GB after) and NetworkManager.
+* The download (about 3 GB) shows a progress bar, is checked against the release
+  checksums and **resumes** if it stops: just run the same command again.
+  Nothing big goes to `/tmp`.
+* Running the command again later **upgrades** the app and keeps your VM and
+  your Radmin identity.
 
-**No ISO, no Windows install.** You get the **ready-made VM** (~2-3 GB compressed) from
-the GitHub Release — the installer just downloads and imports it. Nobody needs a Windows
-ISO or has to wait for Windows to install.
+Options go on the bash side of the pipe, e.g. `curl ... | RADMIN_MIRROR=gitlab bash`:
 
-> **Small footprint — 1 GB RAM · 1 CPU.** The bundled Windows VM runs on **1 GB of RAM
-> and a single CPU** on purpose, so it never hogs the machine of whoever installs it.
-> This is declared right in the app header. Override with `RADMIN_VM_RAM` /
-> `RADMIN_VM_SMP` if a heavier Windows peer ever needs more.
+| option | what it does |
+|---|---|
+| `RADMIN_MIRROR=gitlab` | download from the [GitLab mirror](https://gitlab.com/gabriel17166/radmin-linux) |
+| `RADMIN_VERSION=0.3.0` | a specific release instead of the latest |
+| `RADMIN_NEW_IMAGE=1` | download a fresh VM image even if one is installed |
+| `RADMIN_VM_IMAGE=/path/file.qcow2.zst` | use an image you already have |
 
-## Status (where we stopped)
+Uninstall: `~/.local/share/radmin-linux/uninstall.sh` (add `--keep-image` to keep the VM).
 
-**Works end to end.** From zero to daily use:
+## Your own Radmin identity
 
-- ✅ **UI** (`app/`): turn the VM on/off, connect/disconnect, see peers
-  (online and offline), rename the node, **multi-network bar**, tray with full
-  control, menu icon.
-- ✅ **VM agent** (`agent/`): auto-configures ICS at boot, auto-heal, auto-update.
-- ✅ **Install**: `install.sh` (multi-distro), `bootstrap.sh` (curl | bash),
-  RPM + Arch packages in `packaging/`.
-- ✅ **Image build**: `build-vm.sh --from-scratch WIN.iso` (from bare Windows to a
-  ready VM, 100% automatic, validated) or `--clean` (from a VM that already works).
-  Base image in `dist/` (not versioned, ~3 GB).
-- ✅ **Stability**: opening the app does **not** start the VM or freeze the machine
-  (the launcher uses `preflight.sh --light`); it runs at low I/O priority. Querying
-  the VM is **manual by default** (System → *Auto-refresh* opts into 30s polling;
-  *Refresh now* queries once), so nothing hits the VM in the background. The liveness
-  check is **process-free** (unprivileged ICMP sockets — no `ping` processes).
-- ✅ **Peers grouped by network**: collapsible per-network sections (manual grouping
-  via right-click → *Move to network*), a Network → *Show online only* filter, and a
-  *＋ Network* button up top.
+Radmin keeps the node identity (node id, 26.x address, network list) inside
+Windows. The VM image of **0.1.0 shipped with the builder's identity**, so
+everyone who downloaded it appeared as the same node and saw the same networks.
 
-**Missing / next steps:**
-- Powering the VM on still costs ~1-2 min of Windows boot (at low priority; without
-  freezing). It could be smoothed (a "starting…" hint, fewer vCPUs at boot).
-- Filtering peers **per network** for real and showing the **real network name**
-  require decoding the `RadminVpnGuiChannel` LPC protocol (today: the chip
-  highlights the network; names are local nicknames).
+Since 0.3.0 every install gets its own identity automatically:
 
-> Historical note: this started as a read-only clone (phase 2) and grew into full
-> control + automatic provisioning. The "phase 2" mentions below are from that start.
+* the release image starts with no identity at all;
+* each install has its own id (`RADMIN_VM_UUID` in `~/.config/radmin-linux/config.env`);
+  when the VM sees a different id (a copied or older image) it resets Radmin to
+  a brand new node and the app tells you once;
+* **System > Reset Radmin identity** does it by hand at any time.
 
-    radmin-linux/
-    ├── agent/          scripts that run INSIDE the VM (Windows)
-    │   ├── net-orchestrator.ps1  ensures ICS at boot (fixes ordering)
-    │   ├── power-guard.ps1       VM never sleeps/hibernates/reboots
-    │   ├── radmin-update.ps1     finds the latest version on the page and installs
-    │   ├── health.ps1            diagnoses and AUTO-REPAIRS each component
-    │   └── agent-install.ps1     registers the boot tasks
-    ├── app/            Linux client
-    │   ├── main.py     Qt UI (clone) + tray
-    │   ├── backend.py  transport: calls the shim over WMI and parses the JSON
-    │   ├── roster.py   persistent peer list (offline + local nicknames)
-    │   ├── vmctl.py    turns the whole VM on/off (QEMU monitor + preflight)
-    │   ├── agent.py    triggers the agent scripts and reads updates
-    │   ├── discover.py GUI dump → complete peer list (online+offline)
-    │   └── icons.py    logo/signal/power drawn with QPainter
-    ├── shim/
-    │   └── radmin-shim.ps1   runs in the VM, returns Radmin state as JSON
-    ├── radmin-linux.sh   opens the UI (auto-repairs the stack first)
-    ├── deploy-shim.sh    (re)sends the shim to C:\ in the VM
-    └── deploy-agent.sh   (re)sends the agent to C:\radmin-agent in the VM
+If you installed 0.1.0: after upgrading, the first boot gives you a new node, so
+join your networks again. If you run a Radmin network that someone joined with
+a 0.1.0 install, that member may be the shared identity: remove it and change
+the network password.
+
+## What is fixed in 0.3.0
+
+See [CHANGELOG.md](CHANGELOG.md). In short: no more shared identity and
+networks, the window answers instantly (agent API instead of a 10 to 20 s WMI
+login per refresh), the VM idles at about 2% of one core, a clean VNC picture,
+a firewall inside the VM, and a curl installer that resumes and verifies.
 
 ## How it works
 
-    UI (Linux) ──WMI/impacket over the tap──▶ Windows VM ──▶ real Radmin
-                bench:bench@192.168.137.1         C:\radmin-shim.ps1
+    Linux app ──HTTP (API) / WMI──▶ Windows VM (1 GB, 1 CPU, headless) ──▶ real Radmin VPN
+        │                              │  ICS shares the Radmin adapter
+        └── route 26.0.0.0/8 ─── tap ──┘  with the Linux link (NAT)
 
-- **node** (name/IP/status): from the VM itself
-- **online peers + IP**: ARP table of the Radmin adapter (real time)
-- **peer hostname**: NetBIOS (`nbtstat`)
-- **nickname**: double-click a peer — local, UI-only (does not touch Radmin)
-- **offline**: the roster remembers who was seen; **liveness via ICMP sweep** from
-  Linux (we have a route to 26.0.0.0/8) every 30s — whoever does not reply is offline
-- **connect/disconnect**: click the power button or Network menu → stops/starts the
-  RvControlSvc (the mesh's real switch). Validated: drops/restores the peers.
-- **leave network**: Network menu → removes the association (Networks\{GUID} key)
-- **join/create network**: needs the Radmin server (proprietary protocol) — the UI
-  opens the real Radmin window in the VM (VNC) for you to do it, then refreshes
+* **tapradmin** (192.168.137.2) is a private link between Linux and the VM
+  (192.168.137.1). Linux routes 26.0.0.0/8 through it; Windows Internet
+  Connection Sharing NATs that traffic into the Radmin network.
+* **The agent** (`agent/`, runs in the VM as scheduled tasks): gives the install
+  its own identity, hardens Windows, keeps ICS applied, never sleeps, self
+  repairs every 15 min and serves a small JSON API on the private link only.
+* **The app** (`app/`, PySide6): node, status and peers (online from ARP and
+  ping, offline from a local roster, full member list from the Radmin window),
+  connect/disconnect, rename, leave, Radmin updates, tray icon, watchdog.
+* **Join / create a network** needs the real Radmin window (it does the
+  handshake with the Radmin servers): the app brings it to the front and opens
+  it in a VNC viewer.
 
-## Usage
+### Security
 
-    ./radmin-linux.sh    # auto-repairs the stack and opens the window (closes to tray)
+* The VM firewall blocks everything coming in except from the Linux link and
+  pings. Radmin peers cannot reach Windows services.
+* On Linux, the link is in the firewalld zone **block**: the VM cannot open
+  connections to your PC (replies to your own connections still pass).
+* The VM account is `bench:bench`. It is only reachable from your own PC.
 
-The launcher runs `preflight.sh`, which checks and fixes 7 layers before opening:
-venv, tapradmin interface, DHCP, VM up, network, WMI, shim in the VM. If the tap
-lost carrier (tun device recreated with the VM alive) it **restarts the VM** by itself.
+## Limits
 
-    ./preflight.sh       # runs only the check/repair (use -q for errors only)
-    ./deploy-shim.sh     # resends the shim manually
+* Hosting a server **on Linux** for your Radmin friends is not supported yet:
+  the VM NATs Linux, so peers can reach the VM's 26.x address but not your PC.
+  Joining servers hosted by others works.
+* The image ships Radmin VPN 2.0.4899.9. Radmin 2.1 needs the Windows 7 SHA-2
+  update; **System > Check for Radmin update** reports that instead of failing
+  silently.
+* Starting the VM takes about 10 to 60 s.
 
-## Limits (honest)
+## Troubleshooting
 
-- The real GUI shows the **Radmin nickname** ("ALICE-LAPTOP"); the shim only reaches
-  the **NetBIOS hostname** ("BOB-PC"). The pretty nickname lives in the LPC protocol
-  (`RadminVpnGuiChannel`) — decoding it would be a separate phase.
-- Each refresh costs ~15-20s (WMI reconnects the SMB + nbtstat per peer).
-- Depends on: VM up, tap `192.168.137.2` alive, UAC disabled in the VM.
-
-## Config (env)
-
-    RADMIN_TARGET=bench:bench@192.168.137.1   # WMI target
-    RADMIN_SHIM='C:\radmin-shim.ps1'          # shim path in the VM
-
-## Automation (VM agent)
-
-The agent runs **by itself at VM boot** (scheduled tasks) and is controllable from the UI:
-
-| script | when | what it does |
-|---|---|---|
-| `power-guard.ps1` | boot (SYSTEM) | locks power: no sleep/hibernate/monitor-off, WU without reboot |
-| `net-orchestrator.ps1` | boot +30s, and at logon | waits for Radmin to connect, ensures ICS (Radmin=public, isolated=private) |
-| `radmin-update.ps1` | on demand | **finds the latest version by scraping the official page**, installs silently |
-| `health.ps1` | every 5 min (SYSTEM) + on demand | diagnoses 6 components and **fixes by itself** whatever is broken |
-
-Install/repair: `./deploy-agent.sh` + menu **System → Install/repair agent**.
-
-## The UI power button = the whole VM
-
-For the user, **Radmin VPN (Linux) is the VM**. The power button:
-- VM on → shuts the VM down (clean ACPI via the QEMU monitor)
-- VM off → starts the VM (via preflight, which auto-repairs the stack)
-
-Validated: power off from the UI → power back on from the UI → the agent reconfigures
-everything at boot and `RvControlSvc` returns to Running by itself. **With ICS there
-is no L2-bridge deadlock.**
-
-## Auto-heal — the portal never needs you to look at the VM
-
-`health.ps1` checks and **repairs** 6 components, returning a JSON report:
-
-| component | how it fixes it |
+| what | where |
 |---|---|
-| Radmin service | restarts RvControlSvc |
-| Mesh IP (26.x) | (diagnostic) |
-| Sharing (ICS) | reapplies Radmin=public / isolated=private |
-| Bridge to Linux (192.168.137.1) | (diagnostic) |
-| Power locked | `powercfg -h off` + timeouts zeroed |
-| Boot agent | (diagnostic) |
+| check and repair everything | `~/.local/share/radmin-linux/preflight.sh` |
+| install log | `~/.local/share/radmin-linux/install.log` |
+| VM console (the Windows screen) | Network > Open the Radmin window |
+| VM diagnostics with repair | System > Full diagnostics |
+| agent logs (in the VM) | `C:\radmin-agent\*.log` |
+| reinstall the VM agent | System > Reinstall the VM agent, or `deploy-agent.sh --force` |
 
-**Double redundancy:**
-- the UI runs `health -Heal` every 2 min in the background (silent auto-heal)
-- the VM runs `health -Heal` every 5 min (SYSTEM task) even with the UI closed
+Settings live in `~/.config/radmin-linux/config.env` (environment variables win).
+Useful ones: `RADMIN_VM_RAM` (MB, default 1024), `RADMIN_VM_SMP` (default 1),
+`RADMIN_NET=passt` (alternative VM network, uses more CPU on QEMU 11).
 
-Validated: stop the service → the portal detects it and restarts it by itself
-(`healed: true`), without touching the VM. Menu **System → Full diagnostics** shows
-the visual report.
+## Building the VM image (maintainers)
 
-## Automatic version discovery
+    ./build-vm.sh --clean SRC.qcow2      # release image from a working VM (SRC untouched)
+    ./build-vm.sh --from-scratch WIN.iso # Windows + Radmin from zero
 
-`radmin-update.ps1` downloads the official page on the VM itself, extracts the highest
-`Radmin_VPN_<version>.exe`, compares it with the installed `RvRvpnGui.exe`, and installs
-if newer. When Famatech publishes a new version, the portal detects it with no fixed URL.
+`--clean` boots a throwaway copy **offline**, installs the current agent, runs
+`provision/release-clean.ps1` (no identity, no networks, no browser, logs and
+caches gone, neutral computer name, free space zeroed) and writes the split
+`.zst` parts plus `SHA256SUMS`.
 
-## Full member list (online AND offline)
+## Repository
 
-To give confidence that you are connected to a real network, the UI shows **all
-members**, not only the active ones. The full list (the same one the Radmin GUI shows)
-lives only in the GUI process memory — `discover.py` takes a minidump of `RvRvpnGui`,
-downloads it (~200MB, seconds over the tap) and extracts the 26.x IPs (via UTF-16,
-reliable) and the names (best-effort, in-memory correlation).
+    agent/       scripts that run inside the VM (identity, harden, api, boot, health, update…)
+    app/         the Linux app (PySide6)
+    shim/        old WMI state script, fallback for VMs without the API
+    provision/   unattended Windows setup and the release cleaner
+    vm/          run / stop / view the VM
+    bootstrap.sh install.sh uninstall.sh preflight.sh radmin-linux.sh deploy-agent.sh build-vm.sh
 
-- runs automatically ~8s after opening, and via **Network → Sync network members**
-- the IPs are the solid base; names come from 3 sources: manual nickname > NetBIOS
-  (online) > name discovered in memory > IP
-- the ping sweep keeps online/offline; offline shows greyed out with an X
-
-## Rename the node
-
-**Network → Rename this node…** (or double-click the name at the top) changes Radmin's
-`Alias` — the name the other peers see. It persists in the registry and restarts the
-service to re-announce to the mesh. Validated: it changes and does not revert after
-reconnecting.
-
-## Install and distribution (all automated)
-
-| tool | what it does |
-|---|---|
-| `install.sh [IMG]` | sets up the stack on a clean target: KVM, deps, venv, code, imports the VM, creates tap+DHCP, writes the config, creates the shortcut |
-| `build-vm.sh --from-scratch WIN.iso` | provisions the VM from ZERO: unattended Windows → Radmin → agent → base image. 100% automatic. |
-| `build-vm.sh --clean` | cleans an existing VM for distribution (leaves the network, resets identity) |
-| `packaging/build-rpm.sh` | builds the RPM (`radmin-linux-*.noarch.rpm`) |
-| `packaging/PKGBUILD` | Arch package (`makepkg`) |
-
-The package carries only the code (light); the VM image (~2-3 GB compressed) is shipped
-separately because it is large and carries state.
-
-## Central config
-
-Everything in one place: `app/config.py` (Python) and `env.sh` (shell) read, in order,
-environment variables → `~/.config/radmin-linux/config.env` → defaults. Zero hardcoded
-paths — `install.sh` writes the target's `config.env`.
-
-## Everything from the tray
-
-The tray icon controls everything — turn the VM on/off, connect/disconnect, diagnostics
-with repair, update, sync members — and the tooltip reflects the state. **The user never
-opens the VM.** A watchdog restarts the VM if it hangs.
+Not affiliated with Famatech. Radmin VPN is their product and is downloaded
+from their site.

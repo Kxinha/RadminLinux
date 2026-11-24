@@ -7,7 +7,7 @@ Heavy operation (~200MB): runs on demand / occasionally, not in the loop.
 The result feeds the roster; the ping sweep then keeps online/offline.
 """
 from __future__ import annotations
-import os, re, base64, ipaddress
+import os, re, ipaddress
 import backend
 
 DUMP_VM = r"C:\radmin-agent\gui.dmp"
@@ -49,6 +49,9 @@ def _is_bad_name(cand: str) -> bool:
 
 
 def _make_dump_on_vm(timeout: int = 90) -> bool:
+    d = backend.api("/dump", "POST", timeout=timeout)
+    if d is not None:
+        return bool(d.get("ok"))
     ps = (
         '$p=(Get-Process RvRvpnGui).Id;'
         f'Remove-Item "{DUMP_VM}" -Force -EA SilentlyContinue;'
@@ -56,10 +59,7 @@ def _make_dump_on_vm(timeout: int = 90) -> bool:
         'Start-Sleep 3;'
         f'if(Test-Path "{DUMP_VM}"){{Write-Output "DUMPOK"}}'
     )
-    b64 = base64.b64encode(ps.encode("utf-16-le")).decode()
-    cmd = (f"{backend.WMIEXEC} -shell-type powershell {backend.TARGET} "
-           f'"powershell -EncodedCommand {b64}"')
-    rc, blob = backend.run_capture(cmd, timeout, shell=True)
+    rc, blob = backend.wmi_ps(ps, timeout)
     return "DUMPOK" in blob
 
 
