@@ -14,6 +14,7 @@ PIDFILE = os.path.join(VMDIR, "qemu.pid")
 # power_off and vm-stop.sh), so every app window and the tray can say "Shutting
 # down" instead of mistaking the quiet VM for one that is booting.
 STOPFLAG = os.path.join(VMDIR, "stopping")
+_preflight: "subprocess.Popen | None" = None   # a VM start launched by this app
 RUN = config.RUN_SCRIPT
 PREFLIGHT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "preflight.sh")
 
@@ -26,9 +27,18 @@ def _pid() -> int | None:
             pid = int(f.read().strip())
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             cmd = f.read()
-        return pid if b"qemu" in cmd else None
+        return pid if b"qemu" in cmd and _alive(pid) else None
     except (OSError, ValueError):
         return None
+
+
+def _alive(pid: int) -> bool:
+    """The process exists and is not a zombie (exited, not yet reaped)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
 
 
 def is_running() -> bool:
@@ -83,9 +93,7 @@ def power_off(timeout: int = 60) -> bool:
     _mark_stopping(pid)
     _monitor("system_powerdown")
     for _ in range(timeout):
-        try:
-            os.kill(pid, 0)
-        except OSError:
+        if not _alive(pid):
             _mark_stopping(None)
             return True
         time.sleep(1)
@@ -105,9 +113,7 @@ def power_off_hard() -> bool:
         os.kill(pid, signal.SIGTERM)
         for _ in range(30):            # up to ~15s for an orderly exit
             time.sleep(0.5)
-            try:
-                os.kill(pid, 0)
-            except OSError:
+            if not _alive(pid):
                 break
         else:
             os.kill(pid, signal.SIGKILL)   # truly stuck; absolute last resort
@@ -124,14 +130,97 @@ def power_off_hard() -> bool:
 
 def power_on() -> bool:
     """Start the VM via preflight (which auto-repairs the stack)."""
+    global _preflight
     if is_running():
         return True
     try:
-        subprocess.Popen(["bash", PREFLIGHT, "-q"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # own process group, so a Quit can stop it with all its children
+        # (qemu itself is started with setsid and is not in that group)
+        _preflight = subprocess.Popen(["bash", PREFLIGHT, "-q"], start_new_session=True,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except OSError:
         return False
+
+
+def starting() -> bool:
+    """A VM start launched by this app (preflight.sh) is still running."""
+    return _preflight is not None and _preflight.poll() is None
+
+
+def cancel_start() -> None:
+    """Stop a VM start launched by this app (preflight.sh and its children)."""
+    if not starting():
+        return
+    try:
+        os.killpg(_preflight.pid, signal.SIGTERM)
+        _preflight.wait(5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(_preflight.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def request_power_off(grace: int = 120) -> None:
+    """Ask Windows to shut down and return at once, for when the app cannot
+    wait (logout). A small detached watcher stops qemu if Windows is still
+    not off after `grace` s, so nothing is left behind even then."""
+    pid = _pid()
+    if pid is None:
+        return
+    _mark_stopping(pid)
+    _monitor("system_powerdown", timeout=2)
+    try:
+        subprocess.Popen(["sh", "-c",
+            'i=0; while [ $i -lt "$2" ] && grep -qa qemu "/proc/$1/cmdline" 2>/dev/null; '
+            'do sleep 1; i=$((i+1)); done; '
+            'grep -qa qemu "/proc/$1/cmdline" 2>/dev/null && kill "$1"', "sh", str(pid), str(grace)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def close_viewers() -> None:
+    """Close every VNC viewer showing this VM (also ones opened outside the
+    app), so none is left with a "connection closed" error once the VM is off."""
+    d = os.environ.get("VM_VNC") or config._get("RADMIN_VNC_DISPLAY", "3")
+    addr = f"127.0.0.1::{5900 + int(d)}".encode()
+    me = os.getuid()
+    for e in os.listdir("/proc"):
+        if not e.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{e}").st_uid != me:
+                continue
+            with open(f"/proc/{e}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if argv and os.path.basename(argv[0]) == b"vncviewer" and addr in argv:
+            try:
+                os.kill(int(e), signal.SIGTERM)
+            except OSError:
+                pass
+
+
+def stop_everything(timeout: int = 120) -> bool:
+    """Quit: cancel a VM start in progress, then shut the VM down (ACPI, and
+    qemu is stopped if Windows is not off after `timeout` s). True = nothing
+    of the VM is left running."""
+    if starting():
+        cancel_start()
+        for _ in range(6):        # it may have launched qemu just before
+            if is_running():
+                break
+            time.sleep(0.5)
+    if not is_running():
+        return True
+    if power_off(timeout):
+        return True
+    power_off_hard()
+    return not is_running()
 
 
 def is_responsive(timeout: float = 3) -> bool:

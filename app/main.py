@@ -291,6 +291,9 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._booting = False   # VM on but WMI not answering yet (booting)
         self._stopping = False  # a shutdown is in progress (vmctl.is_stopping)
+        self._quitting = False  # Quit: turning the VM off, then the app exits
+        self._viewers = []      # VNC viewers opened by the app (closed on Quit)
+        self._keep_vm = False   # app restart after an update: leave the VM on
         self._closing = False
         self._last_service = "Unknown"
         self._vm_running = False
@@ -484,6 +487,7 @@ class MainWindow(QMainWindow):
                 sm.addAction(self.actAutoUpd)
                 m.addSeparator()
                 q = QAction("Quit", self); q.triggered.connect(self._quit); m.addAction(q)
+                q.setToolTip("Turns the VM off and closes the app")
             elif name == "Network":
                 self.actOnlineOnly = QAction("Show online only", self)
                 self.actOnlineOnly.setCheckable(True)
@@ -594,6 +598,7 @@ class MainWindow(QMainWindow):
         self.tray.setToolTip("Radmin VPN (Linux)")
         menu = QMenu()
         show = QAction("Show", self); show.triggered.connect(self._show_raise); menu.addAction(show)
+        self.trayShow = show
         menu.addSeparator()
         # full control from the tray — the user never touches the VM
         self.trayPower = QAction("Turn VM on", self)
@@ -608,6 +613,8 @@ class MainWindow(QMainWindow):
         g = QAction("Open the Radmin window", self); g.triggered.connect(self._open_vnc); menu.addAction(g)
         menu.addSeparator()
         quit_ = QAction("Quit", self); quit_.triggered.connect(self._quit); menu.addAction(quit_)
+        quit_.setToolTip("Turns the VM off and closes the app")
+        self.trayQuit = quit_
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
         self.tray.show()
@@ -620,7 +627,9 @@ class MainWindow(QMainWindow):
 
     def _update_tray(self):
         """Reflect the state in the tray icon, tooltip and menu."""
-        if not self._vm_running:
+        if self._quitting:
+            tip, state = "Radmin VPN · turning the VM off, then quitting", "warn"
+        elif not self._vm_running:
             tip, state = "Radmin VPN · VM off", "off"
         elif self._stopping:
             tip, state = "Radmin VPN · shutting down", "warn"
@@ -657,7 +666,7 @@ class MainWindow(QMainWindow):
 
     # ---------- data ----------
     def refresh(self, allow_wmi=False):
-        if self._closing:
+        if self._closing or self._quitting:
             return
         if self._fetcher and self._fetcher.isRunning():
             return
@@ -714,7 +723,7 @@ class MainWindow(QMainWindow):
             _repolish(self.badge)
 
     def _apply(self, st: backend.State):
-        if self._closing:
+        if self._closing or self._quitting:
             return
         if st.ok and self._stopping and self._busy:
             return   # read just before the shutdown request: the VM is going away
@@ -1205,7 +1214,7 @@ class MainWindow(QMainWindow):
 
     # ---------- health / auto-heal (silent, in the background) ----------
     def health_now(self):
-        if self._closing or self._busy:
+        if self._closing or self._busy or self._quitting:
             return
         if self._watch and self._watch.isRunning():
             return
@@ -1308,6 +1317,8 @@ class MainWindow(QMainWindow):
 
     # ---------- acoes (fase 3/4) ----------
     def _sync_actions(self, on: bool):
+        if self._quitting:
+            return
         vm = self._vm_running and not self._stopping
         if hasattr(self, "actConnect"):
             self.actConnect.setEnabled(vm and not on and not self._busy)
@@ -1341,7 +1352,7 @@ class MainWindow(QMainWindow):
 
     def toggle_power(self):
         # the UI power button turns the WHOLE VM on/off (Radmin Linux = the VM)
-        if self._busy:
+        if self._busy or self._quitting:
             return
         if self._stopping:
             self._flash("● the VM is shutting down…")
@@ -1549,9 +1560,9 @@ class MainWindow(QMainWindow):
             return
         def _go():
             actions.show_gui()
-            subprocess.Popen(["bash", view], stdin=subprocess.DEVNULL,
+            self._viewers.append(subprocess.Popen(["bash", view], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+                             start_new_session=True))
             return True, ""
         w = ActionWorker(_go)
         w.done.connect(lambda ok, log: self._flash("● Radmin window opened"))
@@ -1636,18 +1647,61 @@ class MainWindow(QMainWindow):
             f"Updated to {res['latest']}. Restart the app now?\n(The VM keeps running.)")
         if r == QMessageBox.Yes:
             updater.relaunch()
+            self._keep_vm = True   # a restart, not a Quit: the VM stays on
             QApplication.quit()
         else:
             self._flash(f"● updated to {res['latest']}, restart the app to use it", 30)
 
     def _quit(self):
-        if any(isinstance(t, ActionWorker) and t.isRunning() and t is not self._upd
-               for t in self._threads) and self._busy:
+        """Quit = nothing left behind: the VM is shut down (Windows gets up to
+        2 minutes, then qemu is stopped), the VNC viewers are closed, then the
+        app exits. Meanwhile the tray says so."""
+        if self._quitting:
+            return
+        if self._busy and not self._stopping and any(
+                isinstance(t, ActionWorker) and t.isRunning() and t is not self._upd
+                for t in self._threads):
             r = QMessageBox.question(self, "Quit",
-                "An operation (update or VM action) is still running. Quit anyway?")
+                "An operation (update or VM action) is still running.\n"
+                "Quit anyway? The VM will be turned off.")
             if r != QMessageBox.Yes:
                 return
-        QApplication.quit()
+        self._quitting = True
+        for t in (self.timer, self.pingtimer, self.healthtimer, self.updtimer):
+            t.stop()
+        self._close_viewers()
+        if not vmctl.is_running() and not vmctl.starting():
+            QApplication.quit()
+            return
+        self._stopping = True
+        self._show_stopping()
+        self.nodeIp.setText("the app closes when the VM is off")
+        self._set_summary("● turning the VM off, then quitting")
+        self._clear_list()
+        self.menuBar().setEnabled(False)
+        self.power.setEnabled(False)
+        if self.tray.contextMenu():
+            for a in self.tray.contextMenu().actions():
+                a.setEnabled(a is self.trayShow)
+            self.trayQuit.setText("Quitting… (turning the VM off)")
+        self._update_tray()
+        if not self.isVisible() and self.tray.isVisible():
+            self.tray.showMessage("Radmin VPN", "Turning the VM off. Radmin VPN closes when it is done.",
+                                  icons.logo_icon(64), 5000)
+        w = ActionWorker(lambda: (vmctl.stop_everything(), ""))
+        w.done.connect(lambda ok, log: QApplication.quit())
+        self._start(w)
+
+    def _close_viewers(self):
+        import signal
+        for p in self._viewers:
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGTERM)   # own session: viewer + its children
+                except OSError:
+                    pass
+        self._viewers = []
+        vmctl.close_viewers()   # also viewers opened outside the app
 
     def _toggle_autostart(self, on):
         set_autostart(bool(on))
@@ -1685,6 +1739,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         # close to the tray instead of quitting. Without a tray (some desktops)
         # closing quits, otherwise the app would live on with no window at all.
+        # A Quit in progress (or a restart) closes it for real: Qt 6 asks every
+        # window to close before quitting and cancels the quit if one refuses.
+        if self._quitting or self._keep_vm:
+            e.accept()
+            return
         if self.tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable():
             e.ignore(); self.hide()
             if not self.roster.get_setting("tray_hint_shown", False):
@@ -1692,9 +1751,21 @@ class MainWindow(QMainWindow):
                 self.tray.showMessage("Radmin VPN", "Still running in the tray. Quit from the tray menu.",
                                       icons.logo_icon(64), 5000)
         else:
-            QApplication.quit()
+            e.ignore()
+            self._quit()
 
     def shutdown(self):
+        # Quit already turned the VM off. Any other way out (logout, the session
+        # closing the app): ask Windows to shut down without waiting, the VM
+        # powers itself off a few seconds later.
+        if not self._quitting and not self._keep_vm:
+            self._quitting = True
+            try:
+                self._close_viewers()
+                vmctl.cancel_start()
+                vmctl.request_power_off()
+            except Exception:  # noqa
+                pass
         self._closing = True
         self.roster.flush()
         self.timer.stop()

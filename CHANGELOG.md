@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.3 (2026-11-24)
+
+* Quit (tray menu or File menu) leaves nothing behind. It turns the VM off
+  (Windows gets up to 2 minutes, then the VM is stopped), closes the VNC
+  windows showing the VM (also ones opened outside the app), cancels a VM
+  start that is still running, and only then exits. Before, Quit closed only
+  the app and the VM kept running in the background.
+* Meanwhile the tray says "turning the VM off, then quitting", the menu entry
+  reads "Quitting… (turning the VM off)" and only Show stays enabled. With the
+  VM already off the app exits at once.
+* Quit with the window open now really quits (Qt 6 cancelled the quit because
+  the window refused to close and went to the tray instead).
+* Logging out with the app open asks Windows to shut down; a small detached
+  watcher stops the VM if it is still on after 2 minutes.
+* Restarting after an app update still keeps the VM on.
+* A VM process that has exited but was not reaped yet no longer counts as
+  running, so a shutdown is never waited on for nothing.
+
 ## 0.5.2 (2026-11-24)
 
 * While the VM shuts down the app says "Shutting down… / VM is turning off,
