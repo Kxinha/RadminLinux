@@ -1,6 +1,6 @@
 # Maintainer: gabrielmf1998
 pkgname=radmin-linux
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="Run Radmin VPN (Windows-only) on Linux via a headless VM"
 arch=('any')

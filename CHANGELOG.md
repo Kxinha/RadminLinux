@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.4.0 (2026-11-24)
+
+### Updates
+* **In-app updates**: Help > Check for app updates, plus a quiet daily check
+  (one request to the GitHub releases API, GitLab as fallback; can be turned
+  off in System > Settings). "Update now" runs the installer of that release
+  in the background, keeps your VM and identity and offers to restart the app.
+* App releases no longer re-upload the 2.4 GB VM image: `IMAGE_VERSION` names
+  the release that carries it and `bootstrap.sh` downloads it from there.
+* The VM agent is only ever upgraded, never downgraded by an older app.
+
+### Window and tray
+* Ping time next to every online peer; right click > Copy IP.
+* Tray icon shows the state (green dot online, amber starting/disconnected,
+  grey off) and the tooltip shows how many peers are online.
+* Optional notification when Radmin or the VM stops on its own.
+* System > Settings: start with the session (hidden in the tray), turn the
+  VM on when the app opens, notifications, automatic update checks.
+* Only one instance: opening the app again shows the running window.
+* Status messages (action results, errors) stay readable for a few seconds
+  instead of being overwritten by the next refresh.
+* Leave network shows the network label, not only the GUID.
+* Help > Open the install log, Report a problem.
+
+### Lighter
+* Peer rows are reused and only reordered when the order changes (before,
+  every refresh and every ping destroyed and rebuilt the whole list).
+* Hidden in the tray the app polls every 60 s instead of 15 s and draws nothing.
+* The peer list file is written when something changes, not every 15 s.
+* Inside the VM the agent asks WMI for the node address once a minute instead
+  of on every refresh (`/state` 100 ms to 13 ms), and the automatic self repair
+  runs every 10 min instead of every 2 min (the watchdog still checks every 2 min).
+
+### Fixes
+* Peer names with accents came out as garbage (NetBIOS names were decoded in
+  the wrong codepage); old mangled names are cleaned.
+* Closing the window on a desktop without a tray left an invisible process.
+* An upgrade while the VM was running could re-create the tap link under it;
+  the installer now applies link changes in place.
+* The peer list file is written atomically.
+
 ## 0.3.0 (2026-11-24)
 
 ### Identity and privacy

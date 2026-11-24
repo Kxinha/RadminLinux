@@ -23,8 +23,9 @@ power button and use **Network > Join a network**.
 * The download (about 3 GB) shows a progress bar, is checked against the release
   checksums and **resumes** if it stops: just run the same command again.
   Nothing big goes to `/tmp`.
-* Running the command again later **upgrades** the app and keeps your VM and
-  your Radmin identity.
+* **Updates**: Help > Check for app updates (the app also checks once a day
+  and tells you). Running the curl command again does the same. Both keep
+  your VM and your Radmin identity and download only the app.
 
 Options go on the bash side of the pipe, e.g. `curl ... | RADMIN_MIRROR=gitlab bash`:
 
@@ -56,12 +57,13 @@ join your networks again. If you run a Radmin network that someone joined with
 a 0.1.0 install, that member may be the shared identity: remove it and change
 the network password.
 
-## What is fixed in 0.3.0
+## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). In short: no more shared identity and
-networks, the window answers instantly (agent API instead of a 10 to 20 s WMI
-login per refresh), the VM idles at about 2% of one core, a clean VNC picture,
-a firewall inside the VM, and a curl installer that resumes and verifies.
+See [CHANGELOG.md](CHANGELOG.md). **0.4.0**: in-app updates, tray icon with
+the state, ping time per peer, settings to start with the session and turn the
+VM on with the app, one instance only, lighter refresh. **0.3.0**: own identity
+per install, instant window (agent API), VM at about 2% of one core, clean
+VNC picture, firewall in the VM, a curl installer that resumes and verifies.
 
 ## How it works
 
@@ -111,7 +113,12 @@ a firewall inside the VM, and a curl installer that resumes and verifies.
 | agent logs (in the VM) | `C:\radmin-agent\*.log` |
 | reinstall the VM agent | System > Reinstall the VM agent, or `deploy-agent.sh --force` |
 
-Settings live in `~/.config/radmin-linux/config.env` (environment variables win).
+In the app, **System > Settings**: start with the session (in the tray), turn
+the VM on when the app opens, notify when the connection drops, check for app
+updates automatically (once a day, one request to the GitHub releases API,
+nothing else is sent).
+
+Lower level settings live in `~/.config/radmin-linux/config.env` (environment variables win).
 Useful ones: `RADMIN_VM_RAM` (MB, default 1024), `RADMIN_VM_SMP` (default 1),
 `RADMIN_NET=passt` (alternative VM network, uses more CPU on QEMU 11).
 
@@ -123,7 +130,9 @@ Useful ones: `RADMIN_VM_RAM` (MB, default 1024), `RADMIN_VM_SMP` (default 1),
 `--clean` boots a throwaway copy **offline**, installs the current agent, runs
 `provision/release-clean.ps1` (no identity, no networks, no browser, logs and
 caches gone, neutral computer name, free space zeroed) and writes the split
-`.zst` parts plus `SHA256SUMS`.
+`.zst` parts plus `SHA256SUMS`. Upload them to a release and put that version
+in `IMAGE_VERSION`; app only releases leave `IMAGE_VERSION` alone and carry no
+image (`bootstrap.sh` fetches it from the release named there).
 
 ## Repository
 

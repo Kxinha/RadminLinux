@@ -10,10 +10,11 @@ import sys, os, time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QFrame, QMenuBar, QMenu, QSystemTrayIcon, QInputDialog,
-    QStyle, QSizePolicy, QPushButton,
+    QSizePolicy, QPushButton, QMessageBox,
 )
-from PySide6.QtGui import QAction, QColor, QFont, QCursor
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QGuiApplication
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 sys.path.insert(0, os.path.dirname(__file__))
 import backend
@@ -22,11 +23,17 @@ import agent
 import vmctl
 import icons
 import config
+import updater
 from roster import Roster
 
 POLL_MS = 15000    # state refresh (agent API, < 1 s) every 15s
 PING_MS = 30000    # liveness (ping sweep) every 30s
-HEALTH_MS = 120000 # watchdog + diagnostics/auto-heal every 2 min
+# window hidden in the tray: nobody looks at the list, so poll 4x less
+POLL_HIDDEN_MS = 60000
+PING_HIDDEN_MS = 120000
+UPDATE_CHECK_S = 24 * 3600   # automatic app update check, at most once a day
+HEALTH_MS = 120000 # watchdog probe (one API ping) every 2 min
+HEAL_EVERY_S = 600 # full diagnostics + auto-heal (starts PowerShell in the VM) every 10 min
 BOOT_POLL_MS = 4000  # while the VM boots, check this often (cheap: API only)
 MAX_ROWS = 300     # cap on peer rows (never create thousands of widgets)
 # Watchdog (auto-restart a wedged VM) must NEVER fire during a normal boot:
@@ -51,17 +58,18 @@ QMenu::item:selected { background: #1f4a5f; }
 #card { background: #232a2f; border-bottom: 1px solid #10151a; }
 #nodeName { font-size: 14px; font-weight: 700; color: #f0f3f5; }
 #nodeIp   { font-size: 13px; color: #8fa0aa; }
-#badge { background: #2f6b33; color: #d6f5d8; border-radius: 8px;
-         padding: 1px 10px; font-size: 11px; font-weight: 600; }
-#badgeOff { background: #5a3030; color: #f2d6d6; border-radius: 8px;
-            padding: 1px 10px; font-size: 11px; font-weight: 600; }
-#badgeWarn { background: #6b5a30; color: #f5ecd6; border-radius: 8px;
-             padding: 1px 10px; font-size: 11px; font-weight: 600; }
+#badge { border-radius: 8px; padding: 1px 10px; font-size: 11px; font-weight: 600;
+         background: #5a3030; color: #f2d6d6; }
+#badge[kind="on"]   { background: #2f6b33; color: #d6f5d8; }
+#badge[kind="warn"] { background: #6b5a30; color: #f5ecd6; }
 QScrollArea { border: none; background: #1a1d20; }
 #list { background: #1a1d20; }
-.peer { background: #1a1d20; }
+#peerRow { background: #1a1d20; }
+#peerRow:hover { background: #243139; }
 .peerName { font-size: 13px; color: #e2e6e9; }
+.peerName[off="true"] { color: #6b7378; }
 .peerIp   { font-size: 12px; color: #8a99a2; }
+.peerRtt  { font-size: 11px; color: #6f9f73; }
 #netbar { background: #182028; border-bottom: 1px solid #10151a; }
 .netchip { background: #22323d; color: #cfe6ef; border-radius: 9px;
            padding: 2px 10px; font-size: 11px; }
@@ -102,7 +110,7 @@ class Pinger(QThread):
         self.ips = ips
 
     def run(self):
-        self.done.emit(actions.ping_sweep(self.ips))
+        self.done.emit(actions.ping_rtt(self.ips))
 
 
 class ActionWorker(QThread):
@@ -177,13 +185,18 @@ class NetHeader(QFrame):
         self.arrow = QLabel("▶" if collapsed else "▼")
         self.arrow.setStyleSheet("color:#7f8c93; font-size:10px;")
         lay.addWidget(self.arrow)
-        nm = QLabel(name); nm.setProperty("class", "netHeaderName")
-        lay.addWidget(nm)
-        cnt = QLabel(f"· {count}"); cnt.setProperty("class", "netHeaderCount")
-        lay.addWidget(cnt)
+        self.nm = QLabel(name); self.nm.setProperty("class", "netHeaderName")
+        lay.addWidget(self.nm)
+        self.cnt = QLabel(f"· {count}"); self.cnt.setProperty("class", "netHeaderCount")
+        lay.addWidget(self.cnt)
         lay.addStretch(1)
         self._on_toggle = on_toggle
         self._on_menu = on_menu
+
+    def update_info(self, name, count, collapsed):
+        self.nm.setText(name)
+        self.cnt.setText(f"· {count}")
+        self.arrow.setText("▶" if collapsed else "▼")
 
     def mousePressEvent(self, e):
         if e.button() == Qt.RightButton and self._on_menu:
@@ -192,36 +205,51 @@ class NetHeader(QFrame):
             self._on_toggle(self.gid)
 
 
+def _repolish(w):
+    st = w.style(); st.unpolish(w); st.polish(w)
+
+
 class PeerRow(QFrame):
-    def __init__(self, ip, name, online, on_rename, on_menu=None):
+    """One peer. Rows are reused across refreshes: set_state() only touches what
+    changed, so a refresh no longer rebuilds hundreds of widgets."""
+    def __init__(self, ip, on_rename, on_menu=None):
         super().__init__()
         self.ip = ip
         self._on_menu = on_menu
-        self.setProperty("class", "peer")
+        self._on_rename = on_rename
         self.setObjectName("peerRow")
+        self.setAttribute(Qt.WA_Hover, True)
         self.setFixedHeight(34)
-        self._online = online
+        self._online = None
+        self._label = None
+        self._rtt = None
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 4, 12, 4)
         lay.setSpacing(8)
-
-        self.sig = QLabel()
-        self.sig.setPixmap(icons.signal_pixmap(online, 18))
-        self.sig.setFixedWidth(20)
+        self.sig = QLabel(); self.sig.setFixedWidth(20)
         lay.addWidget(self.sig)
-
-        self.nameLbl = QLabel(name or ip)
-        self.nameLbl.setProperty("class", "peerName")
-        if not online:
-            self.nameLbl.setStyleSheet("color:#6b7378;")
+        self.nameLbl = QLabel(); self.nameLbl.setProperty("class", "peerName")
         lay.addWidget(self.nameLbl, 1)
-
-        self.ipLbl = QLabel(ip)
-        self.ipLbl.setProperty("class", "peerIp")
+        self.rttLbl = QLabel(); self.rttLbl.setProperty("class", "peerRtt")
+        lay.addWidget(self.rttLbl)
+        self.ipLbl = QLabel(ip); self.ipLbl.setProperty("class", "peerIp")
         self.ipLbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(self.ipLbl)
 
-        self._on_rename = on_rename
+    def set_state(self, label, online, rtt=None):
+        if online != self._online:
+            self._online = online
+            self.sig.setPixmap(icons.signal_pixmap(online, 18))
+            self.nameLbl.setProperty("off", not online)
+            _repolish(self.nameLbl)
+        if label != self._label:
+            self._label = label
+            self.nameLbl.setText(label)
+        rtt = rtt if online else None
+        if rtt != self._rtt:
+            self._rtt = rtt
+            self.rttLbl.setText("" if rtt is None else (f"{rtt:.0f} ms" if rtt >= 1 else "<1 ms"))
+            self.setToolTip(f"{self.ip}" + ("" if rtt is None else f" · ping {rtt:.1f} ms"))
 
     def mouseDoubleClickEvent(self, e):
         self._on_rename(self.ip)
@@ -229,12 +257,6 @@ class PeerRow(QFrame):
     def contextMenuEvent(self, e):
         if self._on_menu:
             self._on_menu(self.ip, e.globalPos())
-
-    def enterEvent(self, e):
-        self.setStyleSheet(".peer{background:#243139;} #peerRow{background:#243139;}")
-
-    def leaveEvent(self, e):
-        self.setStyleSheet("")
 
 
 class MainWindow(QMainWindow):
@@ -265,6 +287,22 @@ class MainWindow(QMainWindow):
         self._ensure = None
         self._agent_checked = False   # agent version compared once per VM boot
         self._identity_seen = ""
+        self._rows = {}            # ip -> PeerRow, reused across refreshes
+        self._headers = {}         # group key -> NetHeader
+        self._layout_sig = None
+        self._list_dirty = False
+        self._online = set()
+        self._ping_online = set()   # answered the last ping sweep
+        self._pinged = set()        # were in the last ping sweep (ping beats ARP)
+        self._rtt = {}
+        self._hidden_rows = 0
+        self._n_online = 0
+        self._summary = ""
+        self._flash_until = 0.0
+        self._user_stopped = False   # the user disconnected / turned off: no alert
+        self._was_online = False
+        self._upd = None
+        self._update_offer = None
         self._build()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
@@ -272,6 +310,7 @@ class MainWindow(QMainWindow):
         self.pingtimer.timeout.connect(self.ping_now)
         self._health = None
         self._last_health = None
+        self._last_heal = time.monotonic() - HEAL_EVERY_S + 180   # first one ~3 min after start
         self._discover = None
         self.healthtimer = QTimer(self)
         self.healthtimer.timeout.connect(self.health_now)
@@ -286,12 +325,36 @@ class MainWindow(QMainWindow):
             self._show_manual_idle()
             if self._vm_running:
                 self.refresh()     # one cheap API query; no WMI unless asked
+        # optional: power the VM on when the app opens
+        if self.roster.get_setting("vm_on_start", False) and not vmctl.is_running():
+            QTimer.singleShot(500, self.do_vm_on)
+        # daily app update check (a few seconds after start, never blocks)
+        self.updtimer = QTimer(self)
+        self.updtimer.timeout.connect(lambda: self.check_app_update(manual=False))
+        self.updtimer.start(3600 * 1000)
+        QTimer.singleShot(20000, lambda: self.check_app_update(manual=False))
 
     # ---------- auto vs manual querying ----------
     def _start_auto_timers(self):
-        self.timer.start(POLL_MS)
-        self.pingtimer.start(PING_MS)
+        vis = self.isVisible()
+        self.timer.start(POLL_MS if vis else POLL_HIDDEN_MS)
+        self.pingtimer.start(PING_MS if vis else PING_HIDDEN_MS)
         self.healthtimer.start(HEALTH_MS)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._auto:
+            self._start_auto_timers()
+        if self._list_dirty:
+            self._rebuild_list()
+        if self._auto and self._vm_running:
+            QTimer.singleShot(0, self.refresh)
+            QTimer.singleShot(0, self.ping_now)
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        if self._auto:
+            self._start_auto_timers()
 
     def _stop_auto_timers(self):
         self.timer.stop()
@@ -310,29 +373,26 @@ class MainWindow(QMainWindow):
         self._booting = False
         self.nodeName.setText("Radmin VPN" if running else "VM is off")
         self.nodeIp.setText("Refresh to query the VM" if running else "click power to turn on")
-        self.badge.setText("Manual" if running else "Off")
-        self.badge.setObjectName("badgeWarn" if running else "badgeOff")
-        self.badge.setStyleSheet(QSS)
+        self._set_badge("Manual" if running else "Off", "warn" if running else "off")
         self.power.setPixmap(icons.power_pixmap(running, 48))
         self._sync_actions(False)
         self._update_tray()
         # show the known peers (as offline) so you can organize them into networks
         # without querying; a Refresh will light up who is actually online.
         self._render_peers(set())
-        self.status.setText("● manual mode — Refresh to query"
-                            + ("" if running else " · VM off"))
+        self._set_summary("● manual mode, Refresh to query" + ("" if running else " · VM off"))
 
     def _toggle_auto(self, on: bool):
         self._auto = bool(on)
         self.roster.set_setting("auto_refresh_v3", self._auto)
         if self._auto:
-            self.status.setText("● auto-refresh ON")
+            self._flash("● auto-refresh ON")
             self._start_auto_timers()
             self.refresh()
         else:
             self._stop_auto_timers()
             self._show_manual_idle()
-            self.status.setText("● auto-refresh OFF — manual (Refresh to query)")
+            self._flash("● auto-refresh OFF, Refresh to query")
 
     # ---------- layout ----------
     def _build(self):
@@ -369,7 +429,28 @@ class MainWindow(QMainWindow):
                 ar.setToolTip("New node id and 26.x address, no networks")
                 ar.triggered.connect(self.do_reset_identity); m.addAction(ar)
                 m.addSeparator()
-                q = QAction("Quit", self); q.triggered.connect(QApplication.quit); m.addAction(q)
+                sm = m.addMenu("Settings")
+                self.actAutostart = QAction("Start with my session (in the tray)", self)
+                self.actAutostart.setCheckable(True); self.actAutostart.setChecked(autostart_enabled())
+                self.actAutostart.toggled.connect(self._toggle_autostart); sm.addAction(self.actAutostart)
+                self.actVmOnStart = QAction("Turn the VM on when the app opens", self)
+                self.actVmOnStart.setCheckable(True)
+                self.actVmOnStart.setChecked(bool(self.roster.get_setting("vm_on_start", False)))
+                self.actVmOnStart.toggled.connect(lambda on: self.roster.set_setting("vm_on_start", bool(on)))
+                sm.addAction(self.actVmOnStart)
+                self.actNotify = QAction("Notify when the connection drops", self)
+                self.actNotify.setCheckable(True)
+                self.actNotify.setChecked(bool(self.roster.get_setting("notify", True)))
+                self.actNotify.toggled.connect(lambda on: self.roster.set_setting("notify", bool(on)))
+                sm.addAction(self.actNotify)
+                self.actAutoUpd = QAction("Check for app updates automatically", self)
+                self.actAutoUpd.setCheckable(True)
+                self.actAutoUpd.setChecked(bool(self.roster.get_setting("auto_update_check", True)))
+                self.actAutoUpd.setToolTip("Once a day, one request to the GitHub releases API")
+                self.actAutoUpd.toggled.connect(lambda on: self.roster.set_setting("auto_update_check", bool(on)))
+                sm.addAction(self.actAutoUpd)
+                m.addSeparator()
+                q = QAction("Quit", self); q.triggered.connect(self._quit); m.addAction(q)
             elif name == "Network":
                 self.actOnlineOnly = QAction("Show online only", self)
                 self.actOnlineOnly.setCheckable(True)
@@ -398,6 +479,14 @@ class MainWindow(QMainWindow):
                 self.actGui = QAction("Open the Radmin window", self)
                 self.actGui.triggered.connect(self._open_vnc); m.addAction(self.actGui)
             elif name == "Help":
+                a = QAction("Check for app updates…", self)
+                a.triggered.connect(lambda: self.check_app_update(manual=True)); m.addAction(a)
+                a = QAction("Open the install log", self)
+                a.triggered.connect(lambda: self._open_path(os.path.join(config.HOME, "install.log"))); m.addAction(a)
+                a = QAction("Report a problem…", self)
+                a.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(
+                    f"https://github.com/{updater.GITHUB}/issues"))); m.addAction(a)
+                m.addSeparator()
                 a = QAction("About", self); a.triggered.connect(self._about); m.addAction(a)
             mb.addMenu(m)
         v.addWidget(mb)
@@ -430,7 +519,7 @@ class MainWindow(QMainWindow):
         self.nodeName.mouseDoubleClickEvent = lambda e: self.do_rename_node()
         self.nodeIp = QLabel("—"); self.nodeIp.setObjectName("nodeIp")
         rowb = QHBoxLayout(); rowb.setSpacing(6)
-        self.badge = QLabel("Offline"); self.badge.setObjectName("badgeOff")
+        self.badge = QLabel("Offline"); self.badge.setObjectName("badge")
         self.badge.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         rowb.addWidget(self.badge); rowb.addStretch(1)
         box.addWidget(self.nodeName); box.addWidget(self.nodeIp); box.addLayout(rowb)
@@ -474,7 +563,7 @@ class MainWindow(QMainWindow):
         show = QAction("Show", self); show.triggered.connect(self._show_raise); menu.addAction(show)
         menu.addSeparator()
         # full control from the tray — the user never touches the VM
-        self.trayPower = QAction("Turn VM on/off", self)
+        self.trayPower = QAction("Turn VM on", self)
         self.trayPower.triggered.connect(self.toggle_power); menu.addAction(self.trayPower)
         self.trayConn = QAction("Connect / Disconnect", self)
         self.trayConn.triggered.connect(self._tray_toggle_conn); menu.addAction(self.trayConn)
@@ -485,7 +574,7 @@ class MainWindow(QMainWindow):
         r = QAction("Refresh", self); r.triggered.connect(self.refresh_full); menu.addAction(r)
         g = QAction("Open the Radmin window", self); g.triggered.connect(self._open_vnc); menu.addAction(g)
         menu.addSeparator()
-        quit_ = QAction("Quit", self); quit_.triggered.connect(QApplication.quit); menu.addAction(quit_)
+        quit_ = QAction("Quit", self); quit_.triggered.connect(self._quit); menu.addAction(quit_)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
         self.tray.show()
@@ -497,19 +586,29 @@ class MainWindow(QMainWindow):
             self.do_connect()
 
     def _update_tray(self):
-        """Reflect the state in the tooltip and the tray menu."""
+        """Reflect the state in the tray icon, tooltip and menu."""
         if not self._vm_running:
-            tip = "Radmin VPN — VM off"
+            tip, state = "Radmin VPN · VM off", "off"
+        elif self._booting:
+            tip, state = "Radmin VPN · starting", "warn"
         elif self._last_service == "Running":
-            n = sum(1 for i in range(self.listv.count())
-                    if isinstance(self.listv.itemAt(i).widget(), PeerRow)
-                    and self.listv.itemAt(i).widget()._online)
-            tip = f"Radmin VPN — online ({self._node_ip})"
+            tip, state = f"Radmin VPN · online {self._node_ip} · {self._n_online} peers online", "on"
         else:
-            tip = "Radmin VPN — disconnected"
-        self.tray.setToolTip(tip)
+            tip, state = "Radmin VPN · disconnected", "warn"
+        if tip != self.tray.toolTip():
+            self.tray.setToolTip(tip)
+        if state != getattr(self, "_tray_state", None):
+            self._tray_state = state
+            self.tray.setIcon(icons.tray_icon(state))
         if hasattr(self, "trayConn"):
             self.trayConn.setText("Disconnect" if self._last_service == "Running" else "Connect")
+            self.trayConn.setEnabled(self._vm_running and not self._booting)
+        if hasattr(self, "trayPower"):
+            self.trayPower.setText("Turn VM off" if self._vm_running else "Turn VM on")
+
+    def _notify(self, title, text):
+        if self.roster.get_setting("notify", True) and self.tray.isVisible():
+            self.tray.showMessage(title, text, icons.logo_icon(64), 8000)
 
     # ---------- worker threads ----------
     def _start(self, t):
@@ -527,7 +626,7 @@ class MainWindow(QMainWindow):
         if self._fetcher and self._fetcher.isRunning():
             return
         if allow_wmi:
-            self.status.setText("querying the VM…")
+            self._flash("querying the VM…")
         self._fetcher = Fetcher(allow_wmi=allow_wmi)
         self._fetcher.got.connect(self._apply)
         self._start(self._fetcher)
@@ -543,12 +642,11 @@ class MainWindow(QMainWindow):
             return
         if self._ensure and self._ensure.isRunning():
             return
-        want = config.agent_version()
-        if st.ok and st.api == want:
+        if st.ok and not agent._older(st.api, config.agent_version()):
             self._agent_checked = True
             return
         self._agent_checked = True
-        self.status.setText("● updating the VM agent…")
+        self._flash("● updating the VM agent…")
         self._ensure = EnsureAgentWorker()
         self._ensure.done.connect(self._ensure_done)
         self._start(self._ensure)
@@ -556,7 +654,7 @@ class MainWindow(QMainWindow):
     def _ensure_done(self, res):
         if self._closing:
             return
-        self.status.setText({"ok": "● VM agent up to date", "upgraded": "● VM agent updated",
+        self._flash({"ok": "● VM agent up to date", "upgraded": "● VM agent updated",
                              "failed": "● could not update the VM agent (System > Reinstall)"}.get(res, res))
         QTimer.singleShot(1500, self.refresh)
 
@@ -572,6 +670,12 @@ class MainWindow(QMainWindow):
             f"Reason: {note}")
         actions.ack_identity()
 
+    def _set_badge(self, text, kind):
+        self.badge.setText(text)
+        if self.badge.property("kind") != kind:
+            self.badge.setProperty("kind", kind)
+            _repolish(self.badge)
+
     def _apply(self, st: backend.State):
         if self._closing:
             return
@@ -583,23 +687,23 @@ class MainWindow(QMainWindow):
             self._vm_started_at = time.monotonic()
         if not st.ok:
             self._last_service = "Stopped"
-            self.status.setText(f"● {st.error}")
-            # qemu alive but WMI still not answering = VM BOOTING (not off)
+            # qemu alive but the agent not answering yet = VM BOOTING (not off)
             self._booting = bool(st.vm_running)
             if not st.vm_running:
                 self._agent_checked = False
                 self.nodeName.setText("VM is off")
                 self.nodeIp.setText("click power to turn on")
-                self.badge.setText("Off")
-                self.badge.setObjectName("badgeOff")
+                self._set_badge("Off", "off")
                 self.power.setPixmap(icons.power_pixmap(False, 48))
+                if was_running and not self._user_stopped and not self._busy:
+                    self._notify("Radmin VPN stopped", "The Windows VM is no longer running.")
+                self._was_online = False
             else:
                 self.nodeName.setText("Starting…")
                 self.nodeIp.setText("VM is booting, please wait")
-                self.badge.setText("Starting")
-                self.badge.setObjectName("badgeWarn")
+                self._set_badge("Starting", "warn")
                 self.power.setPixmap(icons.power_pixmap(True, 48))
-            self.badge.setStyleSheet(QSS)
+            self._set_summary(f"● {st.error}")
             self._sync_actions(False)
             self._update_tray()
             self._clear_list()
@@ -612,6 +716,7 @@ class MainWindow(QMainWindow):
                     self._maybe_ensure_agent(st)
             return
 
+        first = self._booting or not was_running or self._last_service != "Running"
         self._booting = False
         self._maybe_ensure_agent(st)
         self._check_identity_notice(st)
@@ -621,48 +726,98 @@ class MainWindow(QMainWindow):
         self.nodeIp.setText(st.node_ip or "—")
         self._node_ip = st.node_ip
         on = (st.service == "Running")
+        if self._was_online and not on and not self._user_stopped and not self._busy:
+            self._notify("Radmin VPN disconnected", "The Radmin service stopped in the VM.")
+        if on:
+            self._user_stopped = False
+        self._was_online = on
         self.power.setPixmap(icons.power_pixmap(on, 48))
-        self.badge.setText("Online" if on else "Offline")
-        self.badge.setObjectName("badge" if on else "badgeOff")
-        self.badge.setStyleSheet(QSS)
+        self._set_badge("Online" if on else "Offline", "on" if on else "off")
         self._sync_actions(on)
-        self._update_tray()
 
-        # discover new peers via ARP (the shim already filters 26.0.0.1)
+        # discover new peers via ARP (the agent already filters 26.0.0.1)
+        new_peer = False
         for p in st.peers:
             if p.ip == "26.0.0.1":
                 continue
-            self.roster.seen(p.ip, p.mac, p.host)
-        self.roster.save()
+            new_peer |= self.roster.seen(p.ip, p.mac, p.host)
+        if new_peer:
+            self.roster.save()
+        else:
+            self.roster.save_soft()
 
         self._networks = list(st.networks)   # GUIDs the node is in (info only)
 
-        # initial liveness = ARP; the ping_sweep refines it right after
-        active = {p.ip for p in st.peers if p.ip != "26.0.0.1"}
-        self._render_peers(active)
-        self.ping_now()   # kicks off active liveness
+        # liveness: ARP marks who is up; the ping sweep (own timer) refines it.
+        # Ping right away only when something changed, not on every refresh.
+        arp = {p.ip for p in st.peers if p.ip != "26.0.0.1"}
+        self._render_peers(self._ping_online | {ip for ip in arp if ip not in self._pinged})
+        if not on:
+            self._set_summary("● Radmin is disconnected (Network > Connect)")
+        if first or new_peer:
+            self.ping_now()
 
         # first discovery only now, with the VM confirmed on and the service up
         if getattr(self, "_want_discover", False) and on:
             self._want_discover = False
             QTimer.singleShot(3000, self.discover_now)
 
-    def _render_peers(self, online_set):
+    def _render_peers(self, online_set, rtt=None):
         self._online = set(online_set)
+        if rtt is not None:
+            self._rtt = dict(rtt)
         self._rebuild_list()
 
     def _clear_list(self):
+        """Empty the list (VM off/booting). Widgets are kept for reuse."""
+        self._place([])
+        self._layout_sig = None
+
+    def _place(self, widgets):
+        """Put exactly these widgets, in this order, above the stretch. Widgets
+        that are no longer wanted are deleted; the others are only moved."""
+        keep = set(map(id, widgets))
         while self.listv.count() > 1:
-            it = self.listv.takeAt(0); w = it.widget()
-            if w:
+            w = self.listv.takeAt(0).widget()
+            if w is not None and id(w) not in keep:
+                if isinstance(w, PeerRow):
+                    self._rows.pop(w.ip, None)
+                elif isinstance(w, NetHeader):
+                    self._headers.pop(w.gid or "__unassigned__", None)
                 w.deleteLater()
+        for n, w in enumerate(widgets):
+            self.listv.insertWidget(n, w)
+            w.show()
+
+    def _row(self, ip):
+        r = self._rows.get(ip)
+        if r is None:
+            r = self._rows[ip] = PeerRow(ip, self._rename, self._peer_menu)
+        r.set_state(self.roster.label_of(ip), ip in self._online, self._rtt.get(ip))
+        return r
+
+    def _header(self, gid, name, count, collapsed):
+        key = gid or "__unassigned__"
+        h = self._headers.get(key)
+        if h is None:
+            h = self._headers[key] = NetHeader(gid, name, count, collapsed,
+                                               self._toggle_group, self._group_menu)
+        else:
+            h.update_info(name, count, collapsed)
+        return h
 
     def _rebuild_list(self):
         """Render peers in collapsible per-network sections (manual grouping).
         No user groups yet -> a plain flat list. Otherwise: one section per group
         (in order) + an 'Unassigned' section, each collapsible. Honors the
-        Network > 'Show online only' filter."""
-        online = getattr(self, "_online", set())
+        Network > 'Show online only' filter. Rows are reused; while the window is
+        hidden nothing is drawn (it catches up when shown)."""
+        if not self.isVisible():
+            self._list_dirty = True
+            self._update_summary()
+            return
+        self._list_dirty = False
+        online = self._online
         online_only = bool(self.roster.get_setting("online_only", False))
         peers = [ip for ip in self.roster.all_ips()
                  if ip != self._node_ip and ip != "26.0.0.1"]
@@ -676,17 +831,14 @@ class MainWindow(QMainWindow):
                 ips = [ip for ip in ips if ip in online]
             return ips
 
-        self._clear_list()
         groups = self.roster.groups()
         total = sum(len(visible(b)) for b in buckets.values())
+        widgets = []
         shown = 0
-
         if not groups:
             # no groups: flat list (headers would be noise); create groups via ＋
-            for ip in visible(buckets.get(None, [])):
-                if shown >= MAX_ROWS:
-                    break
-                self._add_peer_row(ip, ip in online); shown += 1
+            for ip in visible(buckets.get(None, []))[:MAX_ROWS]:
+                widgets.append(self._row(ip)); shown += 1
         else:
             sections = [(g["id"], g["name"]) for g in groups]
             if buckets.get(None):
@@ -695,28 +847,48 @@ class MainWindow(QMainWindow):
                 ips = visible(buckets.get(gid, []))
                 if online_only and not ips:
                     continue   # when filtering, don't show empty network headers
-                key = gid or "__unassigned__"
-                collapsed = self.roster.is_collapsed(key)
-                hdr = NetHeader(gid, gname, len(ips), collapsed,
-                                self._toggle_group, self._group_menu)
-                self.listv.insertWidget(self.listv.count() - 1, hdr)
+                collapsed = self.roster.is_collapsed(gid or "__unassigned__")
+                widgets.append(self._header(gid, gname, len(ips), collapsed))
                 if collapsed:
                     continue
                 for ip in ips:
                     if shown >= MAX_ROWS:
                         break
-                    self._add_peer_row(ip, ip in online); shown += 1
+                    widgets.append(self._row(ip)); shown += 1
+        sig = tuple(map(id, widgets))
+        if sig != self._layout_sig:          # order or set changed: move widgets
+            self._place(widgets)
+            self._layout_sig = sig
+        self._hidden_rows = max(0, total - shown)
+        self._update_summary()
 
-        nact = sum(1 for ip in peers if ip in online)
-        node = self.nodeIp.text()
-        hidden = f" (+{total - shown} hidden)" if total > shown else ""
-        flt = " · online only" if online_only else ""
-        self.status.setText(f"● {nact} online · {len(peers)} known{flt}{hidden} · node {node}")
+    def _update_summary(self):
+        peers = [ip for ip in self.roster.all_ips() if ip != self._node_ip and ip != "26.0.0.1"]
+        nact = sum(1 for ip in peers if ip in self._online)
+        self._n_online = nact
+        if not self._vm_running or self._booting or self._last_service != "Running":
+            return
+        flt = " · online only" if self.roster.get_setting("online_only", False) else ""
+        hidden = f" (+{self._hidden_rows} hidden)" if self._hidden_rows else ""
+        self._set_summary(f"● {nact} online · {len(peers)} known{flt}{hidden} · node {self._node_ip or '—'}")
+        self._update_tray()
 
-    def _add_peer_row(self, ip, online):
-        label = self.roster.label_of(ip)
-        self.listv.insertWidget(self.listv.count() - 1,
-                                PeerRow(ip, label, online, self._rename, self._peer_menu))
+    # ---------- status line: summary + short-lived messages ----------
+    def _set_summary(self, text):
+        self._summary = text
+        if time.monotonic() >= self._flash_until:
+            self.status.setText(text)
+
+    def _flash(self, text, secs=6.0):
+        """A message (action result, error) that stays readable for a few seconds
+        instead of being overwritten by the next refresh."""
+        self.status.setText(text)
+        self._flash_until = time.monotonic() + secs
+        QTimer.singleShot(int(secs * 1000) + 50, self._unflash)
+
+    def _unflash(self):
+        if time.monotonic() >= self._flash_until and self._summary:
+            self.status.setText(self._summary)
 
     # ---------- network groups (manual assignment) ----------
     def _add_group(self):
@@ -760,6 +932,8 @@ class MainWindow(QMainWindow):
 
     def _peer_menu(self, ip, pos):
         m = QMenu(self)
+        m.addAction(f"Copy IP  {ip}", lambda: (QGuiApplication.clipboard().setText(ip),
+                                              self._flash(f"● {ip} copied")))
         m.addAction("Rename…", lambda: self._rename(ip))
         move = m.addMenu("Move to network")
         cur = self.roster.group_of(ip)
@@ -808,10 +982,12 @@ class MainWindow(QMainWindow):
         self._start(self._pinger)
 
     def _apply_ping(self, result: dict):
-        if self._closing:
+        if self._closing or not self._vm_running:
             return
-        online = {ip for ip, up in result.items() if up}
-        self._render_peers(online)
+        online = {ip for ip, rtt in result.items() if rtt is not None}
+        self._pinged = set(result)
+        self._ping_online = online
+        self._render_peers(online, {ip: rtt for ip, rtt in result.items() if rtt is not None})
 
     # ---------- full-list discovery (GUI dump) ----------
     def discover_now(self):
@@ -819,7 +995,7 @@ class MainWindow(QMainWindow):
             return
         if self._discover and self._discover.isRunning():
             return
-        self.status.setText("● discovering network members…")
+        self._flash("● discovering network members…")
         self._discover = DiscoverWorker()
         self._discover.done.connect(self._apply_discover)
         self._start(self._discover)
@@ -828,12 +1004,12 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         if not peers:
-            self.status.setText("● member sync failed (VM/dump)")
+            self._flash("● member sync failed (VM/dump)")
             return
         novos = self.roster.ingest(peers)
         self._rebuild_list()
         self.ping_now()
-        self.status.setText(f"● {len(peers)} members synced ({novos} new)")
+        self._flash(f"● {len(peers)} members synced ({novos} new)")
 
     # ---------- health / auto-heal (silent, in the background) ----------
     def health_now(self):
@@ -861,7 +1037,7 @@ class MainWindow(QMainWindow):
                 self._unresponsive_strikes = 0
             if self._unresponsive_strikes >= WATCHDOG_STRIKES:
                 self._unresponsive_strikes = 0
-                self.status.setText("● VM unresponsive — recovering…")
+                self._flash("● VM unresponsive — recovering…")
                 self._busy = True
                 self._action = ActionWorker(lambda: (vmctl.recover() != "ok", "watchdog"))
                 self._action.done.connect(lambda ok, log: self._vm_action_done("Recovering VM"))
@@ -869,11 +1045,15 @@ class MainWindow(QMainWindow):
                 return
         else:
             self._unresponsive_strikes = 0
-        # normal auto-heal: only when the VM is really up, not booting
+        # normal auto-heal: only when the VM is really up, not booting, and not
+        # more often than HEAL_EVERY_S (each run starts a PowerShell in the VM)
         if not self._vm_running or self._booting:
             return
         if self._health and self._health.isRunning():
             return
+        if time.monotonic() - self._last_heal < HEAL_EVERY_S:
+            return
+        self._last_heal = time.monotonic()
         self._health = HealthWorker(heal=True)   # always heal in the automatic cycle
         self._health.done.connect(self._apply_health)
         self._start(self._health)
@@ -887,7 +1067,7 @@ class MainWindow(QMainWindow):
         # if something was healed, note it discreetly in the status bar
         if res.get("healed"):
             healed = [c["name"] for c in res.get("checks", []) if c.get("healed")]
-            self.status.setText("● auto-repaired: " + ", ".join(healed))
+            self._flash("● auto-repaired: " + ", ".join(healed))
             QTimer.singleShot(1000, self.refresh)
 
     def do_health(self):
@@ -895,7 +1075,7 @@ class MainWindow(QMainWindow):
         if self._busy:
             return
         self._busy = True
-        self.status.setText("● full diagnostics…")
+        self._flash("● full diagnostics…")
         self._sync_actions(self._last_service == "Running")
         self._health = HealthWorker(heal=True)
         self._health.done.connect(self._health_report)
@@ -930,7 +1110,7 @@ class MainWindow(QMainWindow):
         m.setText(titulo + (" — auto-repaired" if res.get("healed") else ""))
         m.setInformativeText("\n".join(linhas))
         m.exec()
-        self.status.setText("● diagnostics: " + ("all ok" if res.get("all_ok") else "see details"))
+        self._flash("● diagnostics: " + ("all ok" if res.get("all_ok") else "see details"))
         self.refresh()
 
     # ---------- acoes (fase 3/4) ----------
@@ -950,7 +1130,7 @@ class MainWindow(QMainWindow):
         if self._busy:
             return
         self._busy = True
-        self.status.setText(f"● {label}…")
+        self._flash(f"● {label}…")
         self._sync_actions(self._last_service == "Running")
         self._action = ActionWorker(fn)
         self._action.done.connect(lambda ok, log: self._action_done(ok, log, label))
@@ -961,9 +1141,9 @@ class MainWindow(QMainWindow):
             return
         self._busy = False
         if ok:
-            self.status.setText(f"● {label}: ok")
+            self._flash(f"● {label}: ok")
         else:
-            self.status.setText(f"● {label}: failed")
+            self._flash(f"● {label}: failed")
         QTimer.singleShot(1500, self.refresh)
 
     def toggle_power(self):
@@ -981,7 +1161,7 @@ class MainWindow(QMainWindow):
             return
         self._busy = True
         self._vm_started_at = time.monotonic()   # start the watchdog grace now
-        self.status.setText("● turning VM on…")
+        self._flash("● turning VM on…")
         self.nodeName.setText("starting…")
         self._sync_actions(False)
         self._agent_checked = False
@@ -998,7 +1178,8 @@ class MainWindow(QMainWindow):
         if r != QMessageBox.Yes:
             return
         self._busy = True
-        self.status.setText("● turning VM off…")
+        self._user_stopped = True
+        self._flash("● turning VM off…")
         self._sync_actions(True)
         self._action = ActionWorker(lambda: (vmctl.power_off(), "off"))
         self._action.done.connect(lambda ok, log: self._vm_action_done("Turning off"))
@@ -1008,7 +1189,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self._busy = False
-        self.status.setText(f"● {label}: ok")
+        self._flash(f"● {label}: ok")
         self._sync_actions(False)
         # fire one early refresh; while the VM boots _apply keeps polling the API
         QTimer.singleShot(4000, self.refresh)
@@ -1018,7 +1199,7 @@ class MainWindow(QMainWindow):
         if self._busy:
             return
         self._busy = True
-        self.status.setText("● checking for update…")
+        self._flash("● checking for update…")
         self._sync_actions(self._last_service == "Running")
         self._action = ActionWorker(lambda: (agent.check_update(install=False), ""))
         self._action.done.connect(self._update_checked)
@@ -1029,14 +1210,14 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._sync_actions(self._last_service == "Running")
         if not isinstance(res, dict) or res.get("error"):
-            self.status.setText("● update: error")
+            self._flash("● update: error")
             err = res.get("error") if isinstance(res, dict) else res
             QMessageBox.warning(self, "Update", f"Could not check:\n{err}")
             return
         cur = res.get("installed_version", "?")
         lat = res.get("latest_version", "?")
         if res.get("blocked"):
-            self.status.setText(f"● Radmin {cur} ({lat} needs a Windows update)")
+            self._flash(f"● Radmin {cur} ({lat} needs a Windows update)")
             QMessageBox.information(self, "Update", res["blocked"])
             return
         if res.get("has_update"):
@@ -1048,9 +1229,9 @@ class MainWindow(QMainWindow):
                     return bool(r.get("did_install")), str(r.get("error", ""))
                 self._run_action(_inst, "Updating Radmin")
             else:
-                self.status.setText(f"● {cur} ({lat} available)")
+                self._flash(f"● {cur} ({lat} available)")
         else:
-            self.status.setText(f"● Radmin up to date ({cur})")
+            self._flash(f"● Radmin up to date ({cur})")
             QMessageBox.information(self, "Update", f"Already on the latest version ({cur}).")
 
     def do_rename_node(self):
@@ -1093,6 +1274,7 @@ class MainWindow(QMainWindow):
         r = QMessageBox.question(self, "Disconnect",
             "Disconnect from Radmin VPN?\nPeers will be unreachable until you reconnect.")
         if r == QMessageBox.Yes:
+            self._user_stopped = True
             self._run_action(actions.disconnect, "Disconnecting")
 
     def do_leave(self):
@@ -1102,15 +1284,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Leave network", "No associated network found.")
             return
         # if more than one, ask which
+        labels = [f"{self.roster.net_label(g)}  {g}" for g in guids]
         if len(guids) == 1:
             guid = guids[0]
         else:
-            guid, ok = QInputDialog.getItem(self, "Leave network",
-                "Which network to remove?", guids, 0, False)
+            pick, ok = QInputDialog.getItem(self, "Leave network",
+                "Which network to leave? (names are shown in the Radmin window)", labels, 0, False)
             if not ok:
                 return
+            guid = guids[labels.index(pick)]
         r = QMessageBox.question(self, "Leave network",
-            f"Remove the network association\n{guid}?\n\nYou will need to join again with name and password.")
+            f"Leave {self.roster.net_label(guid)}\n{guid}?\n\nYou will need to join again with name and password.")
         if r == QMessageBox.Yes:
             self._run_action(lambda: actions.leave_network(guid), "Leaving network")
 
@@ -1141,11 +1325,11 @@ class MainWindow(QMainWindow):
         """Bring the Radmin window to the front inside the VM, then open the viewer."""
         import subprocess
         if not self._vm_running:
-            self.status.setText("● turn the VM on first")
+            self._flash("● turn the VM on first")
             return
         view = config.VIEW_SCRIPT
         if not os.path.exists(view):
-            self.status.setText(f"● viewer script not found: {view}")
+            self._flash(f"● viewer script not found: {view}")
             return
         def _go():
             actions.show_gui()
@@ -1154,10 +1338,110 @@ class MainWindow(QMainWindow):
                              start_new_session=True)
             return True, ""
         w = ActionWorker(_go)
-        w.done.connect(lambda ok, log: self.status.setText("● Radmin window opened"))
+        w.done.connect(lambda ok, log: self._flash("● Radmin window opened"))
         self._start(w)
-        self.status.setText("● opening the Radmin window…")
+        self._flash("● opening the Radmin window…")
         QTimer.singleShot(20000, self.refresh)
+
+    # ---------- app updates ----------
+    def check_app_update(self, manual=False):
+        if self._closing or (self._upd and self._upd.isRunning()):
+            return
+        if not manual:
+            if not self.roster.get_setting("auto_update_check", True):
+                return
+            if time.time() - float(self.roster.get_setting("last_update_check", 0) or 0) < UPDATE_CHECK_S:
+                return
+        else:
+            self._flash("● checking for app updates…")
+        self._upd = ActionWorker(lambda: (updater.check(), ""))
+        self._upd.done.connect(lambda res, _l: self._app_update_checked(res, manual))
+        self._start(self._upd)
+
+    def _app_update_checked(self, res, manual):
+        if self._closing:
+            return
+        if not res.get("ok"):
+            if manual:
+                QMessageBox.warning(self, "App update", f"Could not check: {res.get('error')}")
+            return
+        self.roster.set_setting("last_update_check", int(time.time()))
+        if not res.get("newer"):
+            if manual:
+                QMessageBox.information(self, "App update",
+                    f"Radmin-Linux {config.VERSION} is the latest version.")
+            return
+        self._update_offer = res
+        if not manual:
+            self._notify("Radmin-Linux update", f"Version {res['latest']} is available (Help > Check for app updates).")
+            self._flash(f"● app update {res['latest']} available (Help menu)", 15)
+            return
+        m = QMessageBox(self)
+        m.setWindowTitle("App update")
+        m.setIcon(QMessageBox.Information)
+        m.setText(f"Radmin-Linux {res['latest']} is available (you have {config.VERSION}).")
+        m.setInformativeText("The update downloads only the app (your VM and your Radmin "
+                             "identity stay). It may ask for your password if a system "
+                             "package is missing.")
+        m.setDetailedText(updater.short_notes(res.get("notes", "")))
+        if updater.managed_by_package():
+            m.setInformativeText("This copy was installed from a package: update it with "
+                                 "your package manager (or the release page).")
+            m.addButton("OK", QMessageBox.AcceptRole)
+            m.exec()
+            return
+        b_now = m.addButton("Update now", QMessageBox.AcceptRole)
+        m.addButton("Later", QMessageBox.RejectRole)
+        m.exec()
+        if m.clickedButton() is b_now:
+            self._install_app_update(res)
+
+    def _install_app_update(self, res):
+        if self._busy:
+            return
+        self._busy = True
+        self._flash(f"● updating the app to {res['latest']}… (log: install.log)", 3600)
+        self._sync_actions(self._last_service == "Running")
+        w = ActionWorker(lambda: updater.install(res["tag"], res["mirror"]))
+        w.done.connect(lambda ok, log: self._app_update_done(ok, log, res))
+        self._start(w)
+
+    def _app_update_done(self, ok, log, res):
+        self._busy = False
+        self._flash_until = 0
+        self._sync_actions(self._last_service == "Running")
+        if not ok:
+            m = QMessageBox(self); m.setIcon(QMessageBox.Warning)
+            m.setWindowTitle("App update"); m.setText("The update failed. Nothing was removed.")
+            m.setDetailedText(log); m.exec()
+            self._flash("● app update failed (Help > Open the install log)", 15)
+            return
+        r = QMessageBox.question(self, "App update",
+            f"Updated to {res['latest']}. Restart the app now?\n(The VM keeps running.)")
+        if r == QMessageBox.Yes:
+            updater.relaunch()
+            QApplication.quit()
+        else:
+            self._flash(f"● updated to {res['latest']}, restart the app to use it", 30)
+
+    def _quit(self):
+        if any(isinstance(t, ActionWorker) and t.isRunning() and t is not self._upd
+               for t in self._threads) and self._busy:
+            r = QMessageBox.question(self, "Quit",
+                "An operation (update or VM action) is still running. Quit anyway?")
+            if r != QMessageBox.Yes:
+                return
+        QApplication.quit()
+
+    def _toggle_autostart(self, on):
+        set_autostart(bool(on))
+        self._flash("● starts with your session" if on else "● no longer starts with your session")
+
+    def _open_path(self, path):
+        if os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        else:
+            self._flash(f"● not found: {path}")
 
     # ---------- misc ----------
     def _about(self):
@@ -1183,12 +1467,20 @@ class MainWindow(QMainWindow):
                 self._show_raise()
 
     def closeEvent(self, e):
-        # close to tray instead of quitting
-        if self.tray.isVisible():
+        # close to the tray instead of quitting. Without a tray (some desktops)
+        # closing quits, otherwise the app would live on with no window at all.
+        if self.tray.isVisible() and QSystemTrayIcon.isSystemTrayAvailable():
             e.ignore(); self.hide()
+            if not self.roster.get_setting("tray_hint_shown", False):
+                self.roster.set_setting("tray_hint_shown", True)
+                self.tray.showMessage("Radmin VPN", "Still running in the tray. Quit from the tray menu.",
+                                      icons.logo_icon(64), 5000)
+        else:
+            QApplication.quit()
 
     def shutdown(self):
         self._closing = True
+        self.roster.flush()
         self.timer.stop()
         self.pingtimer.stop()
         self.healthtimer.stop()
@@ -1209,14 +1501,63 @@ class MainWindow(QMainWindow):
                 pass
 
 
+AUTOSTART = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+                         "autostart", "radmin-linux.desktop")
+
+
+def autostart_enabled() -> bool:
+    return os.path.exists(AUTOSTART)
+
+
+def set_autostart(on: bool) -> None:
+    if not on:
+        try:
+            os.remove(AUTOSTART)
+        except OSError:
+            pass
+        return
+    launcher = os.path.join(config.HOME, "radmin-linux.sh")
+    if not os.path.exists(launcher):
+        launcher = str(config.CODE_ROOT / "radmin-linux.sh")
+    os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+    with open(AUTOSTART, "w") as f:
+        f.write("[Desktop Entry]\nType=Application\nName=Radmin VPN (Unofficial)\n"
+                f"Exec={launcher} --hidden\nIcon=radmin-linux\nTerminal=false\n"
+                "X-GNOME-Autostart-enabled=true\nX-KDE-autostart-after=panel\n")
+
+
+INSTANCE = f"radmin-linux-{os.getuid()}"
+
+
+def _already_running() -> bool:
+    """Single instance: a second launch asks the first one to show its window."""
+    s = QLocalSocket()
+    s.connectToServer(INSTANCE)
+    if s.waitForConnected(500):
+        s.write(b"show\n"); s.flush(); s.waitForBytesWritten(500)
+        s.disconnectFromServer()
+        return True
+    return False
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Radmin VPN (Linux)")
+    app.setDesktopFileName("radmin-linux")
     app.setQuitOnLastWindowClosed(False)
-    w = MainWindow(); w.show()
+    if _already_running():
+        return 0
+    QLocalServer.removeServer(INSTANCE)     # stale socket of a crashed instance
+    server = QLocalServer()
+    server.listen(INSTANCE)
+    w = MainWindow()
+    server.newConnection.connect(lambda: (server.nextPendingConnection(), w._show_raise()))
+    hidden = "--hidden" in sys.argv and QSystemTrayIcon.isSystemTrayAvailable()
+    if not hidden:
+        w.show()
     app.aboutToQuit.connect(w.shutdown)
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

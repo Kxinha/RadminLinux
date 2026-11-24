@@ -4,8 +4,8 @@
 #
 #    curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Radmin-Linux-KDE/main/bootstrap.sh | bash
 #
-#  Downloads the latest release (code + VM image), checks every file against
-#  the release SHA256SUMS and runs install.sh.
+#  Downloads the latest release (code; the VM image from the release named in
+#  IMAGE_VERSION), checks every image part against SHA256SUMS, runs install.sh.
 #   * downloads go to ~/.local/share/radmin-linux/.download (real disk, never
 #     /tmp, which is RAM on most distros) and RESUME if the connection drops:
 #     just run the same command again
@@ -47,15 +47,15 @@ main() {
     [[ -n "$ver" ]] || die "could not find the latest release (no internet? try RADMIN_MIRROR=gitlab)"
   fi
   ver="${ver#v}"
+  rel_base(){ case "$mirror" in
+      github) echo "https://github.com/$GH_REPO/releases/download/v$1" ;;
+      gitlab) echo "$GL_REPO/-/releases/v$1/downloads" ;;
+    esac; }
   case "$mirror" in
-    github) base="https://github.com/$GH_REPO/releases/download/v$ver"
-            src="https://codeload.github.com/$GH_REPO/tar.gz/refs/tags/v$ver" ;;
-    gitlab) base="$GL_REPO/-/releases/v$ver/downloads"
-            src="$GL_REPO/-/archive/v$ver/radmin-linux-v$ver.tar.gz" ;;
+    github) src="https://codeload.github.com/$GH_REPO/tar.gz/refs/tags/v$ver" ;;
+    gitlab) src="$GL_REPO/-/archive/v$ver/radmin-linux-v$ver.tar.gz" ;;
   esac
-  # testing: serve a release from a local folder / other server
-  [[ -n "${RADMIN_RELEASE_URL:-}" ]] && base="$RADMIN_RELEASE_URL"
-  [[ -n "${RADMIN_SRC_URL:-}" ]] && src="$RADMIN_SRC_URL"
+  [[ -n "${RADMIN_SRC_URL:-}" ]] && src="$RADMIN_SRC_URL"     # testing
   say "Radmin-Linux $ver ($mirror)"
 
   # ---- where the downloads go ----
@@ -75,16 +75,23 @@ main() {
     return 1
   }
 
-  say "Checksums"
-  curl -fsSL --retry 5 --retry-all-errors -o "$DL/SHA256SUMS" "$base/SHA256SUMS" \
-    || die "could not download SHA256SUMS from $base"
-
-  say "Code"
+  say "Code $ver"
   rm -f "$DL/src.tar.gz"
   curl -fsSL --retry 5 --retry-all-errors -o "$DL/src.tar.gz" "$src" || die "could not download the code"
   rm -rf "$DL/src"; mkdir -p "$DL/src"
   tar xzf "$DL/src.tar.gz" -C "$DL/src" --strip-components=1 || die "the code archive is damaged"
   rm -f "$DL/src.tar.gz"
+
+  # the VM image is not re-uploaded with every app release: IMAGE_VERSION in the
+  # code names the release that carries it (older releases: their own)
+  local imgver; imgver="$(tr -d ' \r\n' < "$DL/src/IMAGE_VERSION" 2>/dev/null || true)"
+  imgver="${imgver#v}"; [[ -n "$imgver" ]] || imgver="$ver"
+  local base; base="$(rel_base "$imgver")"
+  [[ -n "${RADMIN_RELEASE_URL:-}" ]] && base="$RADMIN_RELEASE_URL"   # testing
+
+  say "Checksums (image of $imgver)"
+  curl -fsSL --retry 5 --retry-all-errors -o "$DL/SHA256SUMS" "$base/SHA256SUMS" \
+    || die "could not download SHA256SUMS from $base"
 
   # ---- VM image ----
   local img_arg=""

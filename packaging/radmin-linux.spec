@@ -1,5 +1,5 @@
 Name:           radmin-linux
-Version:        0.3.0
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Run Radmin VPN (Windows-only) on Linux via a headless VM
 
@@ -58,6 +58,9 @@ echo "  %{_datadir}/radmin-linux/install.sh /path/to/radmin-linux-base.qcow2.zst
 echo "then launch it from the menu, or run: radmin-linux"
 
 %changelog
+* Tue Nov 24 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.4.0-1
+- In-app updates, tray status, ping times, lighter refresh, single instance
+
 * Tue Nov 24 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.3.0-1
 - Own Radmin identity per install, agent API, lighter VM, safer installer
 

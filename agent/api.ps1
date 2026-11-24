@@ -60,6 +60,8 @@ function Get-NbName($ip) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo("nbtstat.exe", "-A $ip")
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    # nbtstat prints in the OEM codepage; the default decoder mangled accented names
+    $psi.StandardOutputEncoding = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($proc.WaitForExit(1200)) {
       foreach ($nl in ($proc.StandardOutput.ReadToEnd() -split "`r?`n")) {
@@ -73,9 +75,16 @@ function Get-NbName($ip) {
 
 function Get-StateJson {
   $script:nbBudget = 3       # at most 3 new NetBIOS lookups per request (~3.6 s worst case)
-  $nodeIp = $null
-  $cfg = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | Where-Object { $_.Description -match "Radmin" } | Select-Object -First 1
-  if ($cfg) { foreach ($ip in $cfg.IPAddress) { if ($ip -like "26.*") { $nodeIp = $ip } } }
+  # the node address barely ever changes and the WMI adapter query is the most
+  # expensive part of a refresh inside the VM: ask WMI at most once a minute
+  $now = [DateTime]::UtcNow
+  if (-not $script:ipAt -or ($now - $script:ipAt).TotalSeconds -ge 60 -or -not $script:nodeIp) {
+    $script:nodeIp = $null
+    $cfg = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | Where-Object { $_.Description -match "Radmin" } | Select-Object -First 1
+    if ($cfg) { foreach ($ip in $cfg.IPAddress) { if ($ip -like "26.*") { $script:nodeIp = $ip } } }
+    $script:ipAt = $now
+  }
+  $nodeIp = $script:nodeIp
   $svc = (Get-Service RvControlSvc).Status
   if (-not $svc) { $svc = "NotInstalled" }
   $peers = @()

@@ -103,3 +103,32 @@ def power_pixmap(on: bool, size: int = 56) -> QPixmap:
     p.drawLine(QPointF(size/2, size*0.20), QPointF(size/2, size*0.46))
     p.end()
     return pm
+
+
+_TRAY_CACHE: dict = {}
+
+
+def tray_icon(state: str) -> QIcon:
+    """Logo with a status dot: on = green, warn = amber (booting/disconnected),
+    off = the logo greyed out. Cached, so a refresh never repaints it."""
+    if state in _TRAY_CACHE:
+        return _TRAY_CACHE[state]
+    icon = QIcon()
+    for size in (16, 22, 24, 32, 48, 64):
+        pm = logo_pixmap(size)
+        p = QPainter(pm)
+        _aa(p)
+        if state == "off":
+            p.setCompositionMode(QPainter.CompositionMode_SourceAtop)
+            p.fillRect(pm.rect(), QColor(40, 44, 48, 170))
+            p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        else:
+            r = size * 0.36
+            col = GREEN if state == "on" else QColor("#e0a030")
+            p.setPen(QPen(QColor("#1d2023"), max(1.0, size * 0.06)))
+            p.setBrush(col)
+            p.drawEllipse(QRectF(size - r - 0.5, size - r - 0.5, r, r))
+        p.end()
+        icon.addPixmap(pm)
+    _TRAY_CACHE[state] = icon
+    return icon

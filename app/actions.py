@@ -159,25 +159,28 @@ def _icmp_packet(seq: int) -> bytes:
     return struct.pack("!BBHHH", _ICMP_ECHO, 0, 0, 0, seq & 0xFFFF) + b"radmin-linux"
 
 
-def _ping_sweep_icmp(ips: list[str], timeout: float = 1.0) -> dict[str, bool] | None:
+def _ping_sweep_icmp(ips: list[str], timeout: float = 1.0) -> dict[str, float | None] | None:
     """Ping every IP through ONE non-blocking ICMP socket -- no `ping` process at
-    all, so it can never storm. Returns ip->online, or None if the kernel denies
-    unprivileged ICMP (then the caller falls back to the bounded subprocess path)."""
+    all, so it can never storm. Returns ip -> round trip in ms (None = no reply),
+    or None if the kernel denies unprivileged ICMP (then the caller falls back
+    to the bounded subprocess path)."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
     except (PermissionError, OSError):
         return None
-    res = {ip: False for ip in ips}
+    res: dict[str, float | None] = {ip: None for ip in ips}
+    sent: dict[str, float] = {}
     try:
         s.setblocking(False)
         for i, ip in enumerate(ips):               # fire all echo requests (cheap)
             if backend._CANCEL.is_set():
                 return res
             try:
+                sent[ip] = time.monotonic()
                 s.sendto(_icmp_packet(i), (ip, 0))
             except OSError:
                 pass
-        pending = set(ips)
+        pending = set(sent)
         deadline = time.monotonic() + timeout
         while pending and time.monotonic() < deadline:
             if backend._CANCEL.is_set():
@@ -191,8 +194,8 @@ def _ping_sweep_icmp(ips: list[str], timeout: float = 1.0) -> dict[str, bool] | 
             except OSError:
                 continue
             src = addr[0]
-            if data and data[0] == 0 and src in res:   # type 0 = echo reply
-                res[src] = True
+            if data and data[0] == 0 and src in pending:   # type 0 = echo reply
+                res[src] = round((time.monotonic() - sent[src]) * 1000, 1)
                 pending.discard(src)
         return res
     finally:
@@ -206,19 +209,25 @@ def _ping_sweep_icmp(ips: list[str], timeout: float = 1.0) -> dict[str, bool] | 
 _PING_GATE = threading.BoundedSemaphore(PING_WORKERS)
 
 
-def _ping1(ip: str) -> tuple[str, bool]:
+_RTT_RE = re.compile(r"time[=<]([\d.]+)")
+
+
+def _ping1(ip: str) -> tuple[str, float | None]:
     if backend._CANCEL.is_set():
-        return ip, False
+        return ip, None
     with _PING_GATE:                               # global ceiling on ping procs
         if backend._CANCEL.is_set():
-            return ip, False
+            return ip, None
         # -n = no reverse DNS (26.x has no PTR and would hang the resolver).
-        rc, _ = backend.run_capture(["ping", "-n", "-c1", "-W1", ip], timeout=3)
-    return ip, (rc == 0)
+        rc, out = backend.run_capture(["ping", "-n", "-c1", "-W1", ip], timeout=3)
+    if rc != 0:
+        return ip, None
+    m = _RTT_RE.search(out)
+    return ip, (float(m.group(1)) if m else 0.1)
 
 
-def _ping_sweep_subprocess(ips: list[str]) -> dict[str, bool]:
-    res: dict[str, bool] = {}
+def _ping_sweep_subprocess(ips: list[str]) -> dict[str, float | None]:
+    res: dict[str, float | None] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=PING_WORKERS) as ex:
         futs = [ex.submit(_ping1, ip) for ip in ips]
         for fut in concurrent.futures.as_completed(futs):
@@ -231,9 +240,10 @@ def _ping_sweep_subprocess(ips: list[str]) -> dict[str, bool]:
     return res
 
 
-def ping_sweep(ips: list[str], workers: int = PING_WORKERS) -> dict[str, bool]:
-    """Return ip->online for the given IPs. Process-free ICMP when allowed,
-    otherwise a bounded `ping` subprocess sweep. Both are capped and cancellable."""
+def ping_rtt(ips: list[str]) -> dict[str, float | None]:
+    """ip -> round trip in ms, None when it did not answer. Process-free ICMP
+    when allowed, otherwise a bounded `ping` subprocess sweep. Both are capped
+    and cancellable."""
     ips = _valid_targets(ips)
     if not ips:
         return {}
@@ -243,9 +253,14 @@ def ping_sweep(ips: list[str], workers: int = PING_WORKERS) -> dict[str, bool]:
     return res
 
 
+def ping_sweep(ips: list[str]) -> dict[str, bool]:
+    """ip -> answered."""
+    return {ip: rtt is not None for ip, rtt in ping_rtt(ips).items()}
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "sweep":
-        print(ping_sweep(sys.argv[2:]))
+        print(ping_rtt(sys.argv[2:]))
     else:
         print("usage: actions.py sweep <ip> [ip...]")

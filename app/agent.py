@@ -135,20 +135,31 @@ def install(log=print) -> bool:
     return True
 
 
+def _older(have: str | None, want: str) -> bool:
+    """True when the VM agent is missing or older than ours. A NEWER agent (left
+    by a newer app) is kept: two app versions must not flip-flop it."""
+    if not have:
+        return True
+    try:
+        return int(have) < int(want)
+    except ValueError:
+        return have != want
+
+
 def ensure_agent(force: bool = False, log=print) -> str:
     """Make sure the VM runs the agent version shipped with this app.
     Returns 'ok', 'upgraded' or 'failed'."""
     import fcntl
     want = config.agent_version()
     have = backend.api_version(timeout=3)
-    if have == want and not force:
+    if not force and not _older(have, want):
         return "ok"
     # one installer at a time (the app and preflight.sh may both try after a boot)
     os.makedirs(config.VMDIR, exist_ok=True)
     with open(os.path.join(config.VMDIR, "agent-install.lock"), "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         have = backend.api_version(timeout=3)
-        if have == want and not force:
+        if not force and not _older(have, want):
             return "ok"
         log(f"agent in the VM: {have or 'none/old'}; installing {want}")
         return "upgraded" if install(log) else "failed"

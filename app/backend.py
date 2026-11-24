@@ -88,12 +88,12 @@ def api_version(timeout: float = 3) -> str | None:
 
 
 # ---------------------------------------------------------------- subprocesses
-def run_capture(cmd, timeout: int, shell: bool = False) -> tuple[int, str]:
+def run_capture(cmd, timeout: int, shell: bool = False, env: dict | None = None) -> tuple[int, str]:
     """Tracked and KILLABLE Popen. Returns (rc, output). rc 124=timeout, 255=cancelled."""
     if _CANCEL.is_set():
         return 255, ""
     try:
-        p = subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE,
+        p = subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, env=env,
                              stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True)
     except OSError as e:
         return 255, str(e)

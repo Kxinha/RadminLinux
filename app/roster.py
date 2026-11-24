@@ -17,6 +17,12 @@ ROSTER_FILE = CONF_DIR / "roster.json"
 MAX_ENTRIES = 512
 
 
+def clean_name(s: str) -> str:
+    """Printable text only (old agents decoded NetBIOS names in the wrong
+    codepage and left U+FFFD and control bytes in them)."""
+    return "".join(ch for ch in (s or "") if ch.isprintable() and ch != "\ufffd").strip()
+
+
 def _valid_ip(s: str) -> bool:
     try:
         ipaddress.IPv4Address(s)
@@ -25,9 +31,17 @@ def _valid_ip(s: str) -> bool:
         return False
 
 
+# last_seen alone changes on every refresh; writing the file for that every 15 s
+# is pointless disk churn. Such "soft" changes are flushed at most this often
+# (and on quit); user edits are written at once.
+SOFT_SAVE_S = 300
+
+
 class Roster:
     def __init__(self) -> None:
         self.entries: dict[str, dict] = {}   # ip -> {name, mac, last_seen}
+        self._soft_dirty = False
+        self._last_save = 0.0
         self.load()
         self.prune()
 
@@ -63,19 +77,40 @@ class Roster:
             self.save()
 
     def save(self) -> None:
+        """Write now (atomic: a crash mid-write never leaves a broken roster)."""
         try:
             CONF_DIR.mkdir(parents=True, exist_ok=True)
-            ROSTER_FILE.write_text(json.dumps(self.entries, indent=2))
+            tmp = ROSTER_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self.entries, indent=1))
+            os.replace(tmp, ROSTER_FILE)
+            self._soft_dirty = False
+            self._last_save = time.monotonic()
         except OSError:
             pass
 
-    def seen(self, ip: str, mac: str = "", host: str = "") -> None:
+    def save_soft(self) -> None:
+        """Write only if something changed and the last write is old enough."""
+        if self._soft_dirty and time.monotonic() - self._last_save >= SOFT_SAVE_S:
+            self.save()
+
+    def flush(self) -> None:
+        if self._soft_dirty:
+            self.save()
+
+    def seen(self, ip: str, mac: str = "", host: str = "") -> bool:
+        """Record a peer seen in ARP. Returns True when it is new or its MAC/host
+        changed (worth saving now), False for a plain last_seen bump."""
+        new = ip not in self.entries
         e = self.entries.setdefault(ip, {"name": "", "host": "", "mac": "", "last_seen": 0})
         e["last_seen"] = int(time.time())
-        if mac:
-            e["mac"] = mac
-        if host:
-            e["host"] = host
+        changed = new
+        if mac and e.get("mac") != mac:
+            e["mac"] = mac; changed = True
+        host = clean_name(host)
+        if host and e.get("host") != host:
+            e["host"] = host; changed = True
+        self._soft_dirty = True
+        return changed
 
     def host_of(self, ip: str) -> str:
         return self.entries.get(ip, {}).get("host", "")
@@ -83,7 +118,7 @@ class Roster:
     def label_of(self, ip: str) -> str:
         """manual nickname > NetBIOS hostname > name discovered in memory > IP"""
         e = self.entries.get(ip, {})
-        return e.get("name") or e.get("host") or e.get("disc") or ip
+        return e.get("name") or clean_name(e.get("host", "")) or clean_name(e.get("disc", "")) or ip
 
     def set_name(self, ip: str, name: str) -> None:
         e = self.entries.setdefault(ip, {"name": "", "mac": "", "last_seen": 0})

@@ -178,6 +178,10 @@ else
 fi
 if ! ip -4 addr show "$TAP" 2>/dev/null | grep -qF "${TAP_IP%/*}"; then
   nmcli con up "$NMCON" >/dev/null 2>&1 || true
+else
+  # already up (maybe with the VM running): apply zone/route changes in place,
+  # never tear the tap down under QEMU
+  nmcli dev reapply "$TAP" >/dev/null 2>&1 || true
 fi
 ip link show "$TAP" >/dev/null 2>&1 && ok "$TAP up ($TAP_IP, 26.0.0.0/8 via the VM, zone $ZONE)" \
   || warn "$TAP not up yet; the app retries when it starts"

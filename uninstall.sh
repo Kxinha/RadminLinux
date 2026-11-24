@@ -24,6 +24,7 @@ nmcli -t -f NAME con show 2>/dev/null | grep -qx "$NMCON" && \
   { nmcli con delete "$NMCON" >/dev/null 2>&1 || pkexec nmcli con delete "$NMCON" >/dev/null 2>&1; }
 
 rm -f "$HOME/.local/share/applications/radmin-linux.desktop" "$HOME/.local/bin/radmin-linux"
+rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/radmin-linux.desktop"
 for d in "$HOME/.local/share/icons/hicolor/"*/apps; do rm -f "$d/radmin-linux.png"; done
 rm -rf "$HOME/.cache/radmin-linux"
 if [[ $KEEP -eq 1 ]]; then
