@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.0 (2026-11-25)
+
+Native engine (OpenRad): what the official Radmin window did, now in the app.
+
+### Network admin
+* Your networks show a ★ when you are an admin, and members that are admins
+  have a ★ too. A network you asked to join shows "(waiting for approval)".
+* Right click a network you administer > Delete network for everyone. You type
+  the network name to confirm.
+* Right click a member > Manage in <network> > Make admin, Remove admin or
+  Remove from the network (only in networks where you are an admin).
+
+### Peers
+* Right click a member > Ping now, and Block this IP: both ways, only what it
+  sends or only what I send. Blocking is silent and local, the peer stays
+  connected and is not told. Blocked rows say "(blocked)".
+* Network > Blocked addresses… lists them and unblocks one.
+* Network > Retry failed peers and Network > Use relays only (no direct
+  UDP/TCP, for networks where direct connections fail; saved in the profile).
+
+### Fixes
+* Join and Create check that the password has 6 to 256 characters (Radmin's
+  rule) before sending it.
+
 ## 0.6.0 (2026-11-25)
 
 ### Native engine: no VM

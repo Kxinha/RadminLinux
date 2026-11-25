@@ -233,8 +233,11 @@ def fetch_state():
         nets.append({"name": str(n.get("name") or "?"), "id": nid, "members": members,
                      "role": ((snap.get("roles") or {}).get(nid) or {}).get(str(data.get("rid")))})
     iface_err = snap.get("interface_error")
+    prefs = data.get("preferences") if isinstance(data.get("preferences"), dict) else {}
     radmin = {"ok": True, "status": "online", "alias": data.get("node_name") or "",
-              "ip": snap.get("vip") or "", "networks": nets}
+              "ip": snap.get("vip") or "", "networks": nets,
+              "blocked": {str(k): str(v).lower() for k, v in (prefs.get("blocked") or {}).items()},
+              "force_relay": bool(prefs.get("force_relay"))}
     st = backend.State(ok=True, vm_running=True, node_ip=str(snap.get("vip") or ""),
                        alias=str(data.get("node_name") or ""), service="Running",
                        networks=[n["id"] for n in nets], ts=int(time.time()),
@@ -314,6 +317,68 @@ def search(query: str = "") -> list[dict]:
 
 def ping(rid: int) -> tuple[bool, str]:
     return _ok(act("ping", str(rid), timeout=20))
+
+
+# ---------------------------------------------------------------- admin (role 2 only)
+# Roles in OpenRad: 0 = pending approval, 1 = member, 2 = admin. The service
+# refuses these for non admins; the app only offers them to admins anyway.
+ROLE_NAMES = {0: "pending approval", 1: "member", 2: "admin"}
+
+
+def delete(network_id: str) -> tuple[bool, str]:
+    """Delete a network for every member (admin only, cannot be undone)."""
+    ok, msg = _ok(act("delete", "--yes", network_id))
+    if ok:
+        end = time.monotonic() + 20
+        while time.monotonic() < end and any(n.get("id") == network_id for n in networks()):
+            time.sleep(1)
+    return ok, msg
+
+
+def kick(network_id: str, rid: int) -> tuple[bool, str]:
+    return _ok(act("kick", network_id, str(rid)))
+
+
+def grant_admin(network_id: str, rid: int) -> tuple[bool, str]:
+    return _ok(act("grant-admin", network_id, str(rid)))
+
+
+def revoke_admin(network_id: str, rid: int) -> tuple[bool, str]:
+    return _ok(act("revoke-admin", network_id, str(rid)))
+
+
+# ---------------------------------------------------------------- peers and preferences
+def retry_peers() -> tuple[bool, str]:
+    return _ok(act("retry-peers", timeout=30))
+
+
+def preferences() -> dict:
+    """Service preferences (force_relay, blocked, ...), {} when off."""
+    p = (call("status", timeout=8).get("data") or {}).get("preferences")
+    return p if isinstance(p, dict) else {}
+
+
+def blocked() -> dict:
+    """{ip: "both" | "incoming" | "outgoing"} of the stealth blocked addresses."""
+    d = call("blocked", timeout=10)
+    b = (d.get("data") or {}).get("blocked") if isinstance(d.get("data"), dict) else None
+    return {str(k): str(v).lower() for k, v in (b or {}).items()}
+
+
+def block(ip: str, direction: str = "both") -> tuple[bool, str]:
+    """Drop the traffic of one 26.x address; the peer stays connected and is
+    not told. direction: both, incoming (ignore what it sends) or outgoing."""
+    extra = {"incoming": ["--incoming"], "outgoing": ["--outgoing"]}.get(direction, [])
+    return _ok(call("block", ip, *extra, timeout=10))
+
+
+def unblock(ip: str) -> tuple[bool, str]:
+    return _ok(call("unblock", ip, timeout=10))
+
+
+def force_relay(enabled: bool) -> tuple[bool, str]:
+    """Relays only (no direct UDP/TCP). Saved in the profile, applies at once."""
+    return _ok(call("force-relay", "true" if enabled else "false", timeout=30))
 
 
 def diagnostics() -> dict:

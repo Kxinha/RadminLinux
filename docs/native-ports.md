@@ -86,6 +86,12 @@ The installer takes the `openrad` binary from the official release copied to
 (`packaging/polkit/`) lets the user run only that path with `tap-helper` as the
 first argument, so the user cannot swap the binary that runs as root.
 
+Since 0.7.0 the app also drives the OpenRad admin and peer commands: `delete`,
+`kick`, `grant-admin`, `revoke-admin` (roles: 0 pending, 1 member, 2 admin; only
+admins may use them), `block`/`unblock` (stored in the profile preferences and
+read back from `status`), `force-relay` and `retry-peers`. Not exposed yet:
+`broadcast-peer`, `server`, `interface-name`.
+
 To move to a newer OpenRad: mirror its release (section below), check what
 changed in `tap-helper`, put the new tag and the sha256 of
 `openrad-<tag>-linux-x86_64.tar.gz` in `OPENRAD_VERSION`, test, release.

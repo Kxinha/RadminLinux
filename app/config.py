@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 CONFIG_ENV = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "radmin-linux" / "config.env"
 CODE_ROOT = Path(__file__).resolve().parent.parent      # dir with env.sh, agent/, shim/
 

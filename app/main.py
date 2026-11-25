@@ -285,7 +285,7 @@ class PeerRow(QFrame):
 
     def contextMenuEvent(self, e):
         if self._on_menu:
-            self._on_menu(self.ip, e.globalPos())
+            self._on_menu(self.ip, e.globalPos(), self.key)
 
 
 class MainWindow(QMainWindow):
@@ -339,6 +339,9 @@ class MainWindow(QMainWindow):
         self._live = None          # networks as the Radmin window shows them (agent 5+)
         self._live_online = set()  # members Radmin is connected to (service.log)
         self._live_via = {}        # ip -> UDP / TCP / TcpRelay
+        self._live_meta = {}       # (network name, ip) -> {"rid", "role"} (native)
+        self._blocked = {}         # ip -> both / incoming / outgoing (native)
+        self._force_relay = False  # native: relays only
         self._hidden_rows = 0
         self._n_online = 0
         self._summary = ""
@@ -531,6 +534,18 @@ class MainWindow(QMainWindow):
                 self.actJoin.triggered.connect(self.do_join); m.addAction(self.actJoin)
                 self.actCreate = QAction("Create network…", self)
                 self.actCreate.triggered.connect(self.do_create); m.addAction(self.actCreate)
+                if NATIVE:
+                    m.addSeparator()
+                    a = QAction("Retry failed peers", self)
+                    a.setToolTip("Try again now the members that did not connect")
+                    a.triggered.connect(self.do_retry_peers); m.addAction(a)
+                    self.actForceRelay = QAction("Use relays only", self)
+                    self.actForceRelay.setCheckable(True)
+                    self.actForceRelay.setToolTip("No direct UDP/TCP, everything through Radmin relays. "
+                                                  "Reconnects; more ping. For networks where direct fails")
+                    self.actForceRelay.toggled.connect(self._toggle_force_relay); m.addAction(self.actForceRelay)
+                    a = QAction("Blocked addresses…", self)
+                    a.triggered.connect(self.do_blocked_list); m.addAction(a)
                 m.addSeparator()
                 self.actGui = QAction("Open the Radmin window", self)
                 self.actGui.triggered.connect(self._open_vnc)
@@ -889,7 +904,7 @@ class MainWindow(QMainWindow):
             # Radmin still connecting: an empty list now would be a guess
             self._waiting = f"Radmin is {status.lower() or 'starting'}"
             return None
-        nets, online, via = [], set(), {}
+        nets, online, via, meta = [], set(), {}, {}
         for n in r["networks"]:
             if not isinstance(n, dict):
                 continue
@@ -899,11 +914,20 @@ class MainWindow(QMainWindow):
                 if not ip.startswith("26.") or ip == self._node_ip:
                     continue
                 ms.append({"ip": ip, "name": str(m.get("name") or "")})
+                meta[(str(n.get("name") or "?"), ip)] = {"rid": m.get("rid"), "role": m.get("role")}
                 if m.get("online"):
                     online.add(ip)
                     via[ip] = str(m.get("via") or "")
-            nets.append({"name": str(n.get("name") or "?"), "members": ms})
+            nets.append({"name": str(n.get("name") or "?"), "members": ms,
+                         "id": n.get("id"), "role": n.get("role")})
         self._live, self._live_online, self._live_via = nets, online, via
+        self._live_meta = meta
+        self._blocked = r.get("blocked") if isinstance(r.get("blocked"), dict) else {}
+        self._force_relay = bool(r.get("force_relay"))
+        if hasattr(self, "actForceRelay") and self.actForceRelay.isChecked() != self._force_relay:
+            self.actForceRelay.blockSignals(True)
+            self.actForceRelay.setChecked(self._force_relay)
+            self.actForceRelay.blockSignals(False)
         return nets
 
     def _set_mode(self, mode):
@@ -958,8 +982,13 @@ class MainWindow(QMainWindow):
         r = self._rows.get(key)
         if r is None:
             r = self._rows[key] = PeerRow(ip, self._rename, self._peer_menu, key)
-        r.set_state(self.roster.label_of(ip), ip in self._online, self._rtt.get(ip),
-                    self._live_via.get(ip, ""))
+        label = self.roster.label_of(ip)
+        if section and section.startswith("net:"):
+            if (self._live_meta.get((section[4:], ip)) or {}).get("role") == 2:
+                label += "  ★"            # network admin
+            if ip in self._blocked:
+                label += "  (blocked)"
+        r.set_state(label, ip in self._online, self._rtt.get(ip), self._live_via.get(ip, ""))
         return r
 
     def _header(self, gid, name, count, collapsed):
@@ -1053,7 +1082,8 @@ class MainWindow(QMainWindow):
                     continue
             total += len(ms)
             collapsed = self.roster.is_collapsed(key)
-            widgets.append(self._header(key, net["name"], f"{n_on}/{len(net['members'])}", collapsed))
+            title = net["name"] + {2: "  ★", 0: "  (waiting for approval)"}.get(net.get("role"), "")
+            widgets.append(self._header(key, title, f"{n_on}/{len(net['members'])}", collapsed))
             if collapsed:
                 continue
             for m in ms:
@@ -1140,6 +1170,10 @@ class MainWindow(QMainWindow):
             m.addAction("Copy network name", lambda: (QGuiApplication.clipboard().setText(name),
                                                      self._flash(f"● {name} copied")))
             if NATIVE:
+                net = self._live_net(name)
+                if net and net.get("role") == 2:
+                    m.addSeparator()
+                    m.addAction("Delete network for everyone…", lambda: self._native_delete(name))
                 m.addAction("Leave this network…", lambda: self._native_leave(name))
             else:
                 m.addAction("Open the Radmin window", self._open_vnc)
@@ -1166,11 +1200,13 @@ class MainWindow(QMainWindow):
             self.roster.remove_group(gid)
             self._rebuild_list()
 
-    def _peer_menu(self, ip, pos):
+    def _peer_menu(self, ip, pos, key=None):
         m = QMenu(self)
         m.addAction(f"Copy IP  {ip}", lambda: (QGuiApplication.clipboard().setText(ip),
                                               self._flash(f"● {ip} copied")))
         m.addAction("Rename…", lambda: self._rename(ip))
+        if NATIVE and self._mode == "live":
+            self._native_peer_items(m, ip, key)
         if self._mode != "fallback":
             m.exec(pos)
             return
@@ -1623,6 +1659,8 @@ class MainWindow(QMainWindow):
             QLineEdit.EchoMode.Password)
         if not ok:
             return
+        if pw and not self._pw_ok(pw):
+            return
         self._run_action(lambda: orctl.join(name, pw or ""), f"Joining {name}")
 
     def _native_create(self):
@@ -1634,9 +1672,16 @@ class MainWindow(QMainWindow):
             return
         pw, ok = QInputDialog.getText(self, "Create network",
             f"Password for {name} (your friends need it to join):", QLineEdit.EchoMode.Password)
-        if not ok or not pw:
+        if not ok or not pw or not self._pw_ok(pw):
             return
         self._run_action(lambda: orctl.create(name, pw), f"Creating {name}")
+
+    def _pw_ok(self, pw) -> bool:
+        """Radmin network passwords are 6 to 256 characters (OpenRad checks it too)."""
+        if 6 <= len(pw) <= 256:
+            return True
+        QMessageBox.information(self, "Radmin VPN", "Network passwords have 6 to 256 characters.")
+        return False
 
     def _native_leave(self, name=None):
         if not self._native_ready():
@@ -1657,6 +1702,103 @@ class MainWindow(QMainWindow):
             f"Leave {name}?\n\nTo come back you need its name (and password if private).")
         if r == QMessageBox.Yes:
             self._run_action(lambda: orctl.leave(name), f"Leaving {name}")
+
+    def _live_net(self, name):
+        return next((n for n in (self._live or []) if n["name"] == name), None)
+
+    def _native_delete(self, name):
+        if not self._native_ready():
+            return
+        net = self._live_net(name)
+        if not net or net.get("role") != 2 or not net.get("id"):
+            return
+        typed, ok = QInputDialog.getText(self, "Delete network",
+            f"Delete {name} for EVERY member?\n\nEveryone is removed and the network is gone "
+            "for good, this cannot be undone.\n\nType the network name to confirm:")
+        if not ok:
+            return
+        if typed.strip() != name:
+            QMessageBox.information(self, "Delete network", "The name did not match, nothing was deleted.")
+            return
+        nid = net["id"]
+        self._run_action(lambda: orctl.delete(nid), f"Deleting {name}")
+
+    def _native_peer_items(self, m, ip, key):
+        """Native extras of a peer's right click menu: block, and admin tools
+        for the network of the section the row is in."""
+        section = key.split("|", 1)[0] if key and "|" in key else ""
+        netname = section[4:] if section.startswith("net:") else ""
+        meta = self._live_meta.get((netname, ip)) or {}
+        net = self._live_net(netname) if netname else None
+        rid = meta.get("rid")
+        label = self.roster.label_of(ip)
+        m.addSeparator()
+        if isinstance(rid, int) and rid:
+            m.addAction("Ping now", lambda: self._run_action(lambda: orctl.ping(rid), f"Ping {label}"))
+        if ip in self._blocked:
+            m.addAction(f"Unblock {ip}", lambda: self._run_action(lambda: orctl.unblock(ip), f"Unblocking {ip}"))
+        else:
+            b = m.addMenu("Block this IP")
+            b.setToolTipsVisible(True)
+            for txt, d, tip in (("Both ways", "both", "Nothing goes to it and nothing it sends gets in"),
+                                ("Only what it sends", "incoming", "Ignore its packets, still send to it"),
+                                ("Only what I send", "outgoing", "Send nothing to it, still receive")):
+                a = b.addAction(txt, lambda d=d: self._run_action(lambda: orctl.block(ip, d), f"Blocking {ip}"))
+                a.setToolTip(tip)
+        if net and net.get("role") == 2 and isinstance(rid, int) and rid and net.get("id"):
+            nid, role = net["id"], meta.get("role")
+            adm = m.addMenu(f"Manage in {netname}")
+            if role == 1:
+                adm.addAction("Make admin", lambda: self._native_member("grant", nid, rid, label, netname))
+            elif role == 2:
+                adm.addAction("Remove admin", lambda: self._native_member("revoke", nid, rid, label, netname))
+            adm.addAction("Remove from the network…", lambda: self._native_member("kick", nid, rid, label, netname))
+
+    def _native_member(self, what, nid, rid, label, netname):
+        if not self._native_ready():
+            return
+        if what == "kick":
+            r = QMessageBox.question(self, "Remove member",
+                f"Remove {label} from {netname}?\n\nThey can join again if they know the password.")
+            if r != QMessageBox.Yes:
+                return
+            return self._run_action(lambda: orctl.kick(nid, rid), f"Removing {label}")
+        if what == "grant":
+            r = QMessageBox.question(self, "Make admin",
+                f"Make {label} an admin of {netname}?\n\nAdmins can remove members and delete the network.")
+            if r != QMessageBox.Yes:
+                return
+            return self._run_action(lambda: orctl.grant_admin(nid, rid), f"Making {label} admin")
+        self._run_action(lambda: orctl.revoke_admin(nid, rid), f"Removing admin from {label}")
+
+    def do_retry_peers(self):
+        if self._native_ready():
+            self._run_action(orctl.retry_peers, "Retrying failed peers")
+
+    def _toggle_force_relay(self, on):
+        if not self._native_ready():
+            self.actForceRelay.blockSignals(True)
+            self.actForceRelay.setChecked(self._force_relay)
+            self.actForceRelay.blockSignals(False)
+            return
+        self._run_action(lambda: orctl.force_relay(bool(on)),
+                         "Relays only: on" if on else "Relays only: off")
+
+    def do_blocked_list(self):
+        if not self._native_ready():
+            return
+        items = sorted(self._blocked.items())
+        if not items:
+            QMessageBox.information(self, "Blocked addresses",
+                "No address is blocked.\n\nRight click a member > Block this IP.")
+            return
+        how = {"both": "both ways", "incoming": "what it sends", "outgoing": "what I send"}
+        rows = [f"{ip}  {self.roster.label_of(ip)}  ({how.get(d, d)})" for ip, d in items]
+        pick, ok = QInputDialog.getItem(self, "Blocked addresses",
+            "Pick one to unblock (they never knew they were blocked):", rows, 0, False)
+        if ok and pick:
+            ip = pick.split()[0]
+            self._run_action(lambda: orctl.unblock(ip), f"Unblocking {ip}")
 
     def do_retry_interface(self):
         if not self._native_ready():

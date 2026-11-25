@@ -91,7 +91,9 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.6.0**: native engine (OpenRad), no VM:
+See [CHANGELOG.md](CHANGELOG.md). **0.7.0**: native network admin (delete a
+network, remove members, make or remove admins), block an IP, relays only and
+retry failed peers, right in the app. **0.6.0**: native engine (OpenRad), no VM:
 the same window and tray drive it, with join, create, leave, rename and
 diagnostics. **0.5.3**: Quit turns the VM off
 and closes everything, nothing keeps running after it. **0.5.2**: "Shutting down" while the VM
