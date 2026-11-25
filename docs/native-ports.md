@@ -21,7 +21,7 @@ published by their own authors; read their licenses and notes before using them.
 |---|---|---|---|---|---|
 | **OpenRad** | Full Rust reimplementation: Linux TAP interface, desktop app, CLI, TCP, UDP and relay peers, Android app, self hosted server | MIT | [gringoestrangeiro/openrad](https://github.com/gringoestrangeiro/openrad) | [gabrielmf1998/openrad](https://github.com/gabrielmf1998/openrad) | [gabriel17166/openrad](https://gitlab.com/gabriel17166/openrad) |
 | radmin-linux-rs | Early Rust client, protocol research notes | MIT | [Pedrodroks34/radmin-linux-rs](https://github.com/Pedrodroks34/radmin-linux-rs) | [gabrielmf1998/radmin-linux-rs](https://github.com/gabrielmf1998/radmin-linux-rs) | [gabriel17166/radmin-linux-rs](https://gitlab.com/gabriel17166/radmin-linux-rs) |
-| radmin-vpn-linux | The official client under Wine with a custom driver and TAP bridge. The branch `marcelo1565/main` holds the Marcelo1565 fork | GPL-3.0 | [baptisterajaut/radmin-vpn-linux](https://github.com/baptisterajaut/radmin-vpn-linux) | not kept (GitLab copy only) | [gabriel17166/radmin-vpn-linux](https://gitlab.com/gabriel17166/radmin-vpn-linux) |
+| radmin-vpn-linux | The official client under Wine with a custom driver and TAP bridge. The branch `marcelo1565/main` holds the Marcelo1565 fork | GPL-3.0 | [baptisterajaut/radmin-vpn-linux](https://github.com/baptisterajaut/radmin-vpn-linux) | not kept | not kept |
 | radmin-on-linux | Radmin LAN/VPN on new and old Linux versions | GPL-3.0 | [Lackind/radmin-on-linux](https://github.com/Lackind/radmin-on-linux) | [gabrielmf1998/radmin-on-linux](https://github.com/gabrielmf1998/radmin-on-linux) | [gabriel17166/radmin-on-linux](https://gitlab.com/gabriel17166/radmin-on-linux) |
 | linmin-vpn | Tray front end (Rust + Slint) for the Radmin control service | GPL-3.0 | [LinCastr/linmin-vpn](https://github.com/LinCastr/linmin-vpn) | [gabrielmf1998/linmin-vpn](https://github.com/gabrielmf1998/linmin-vpn) | [gabriel17166/linmin-vpn](https://gitlab.com/gabriel17166/linmin-vpn) |
 
@@ -29,7 +29,7 @@ Every upstream release is copied to the **Releases** page of both copies, with a
 note on top linking the original release. Copied on 2026-11-24 (OpenRad up to
 v2.4.5).
 GitLab release uploads stop near 100 MB, so the two AppImages above that size
-(radmin-on-linux v0.1.0 and radmin-vpn-linux v0.2.0) are in each GitLab copy's
+(radmin-on-linux v0.1.0) is in its GitLab copy's
 **Package Registry** and linked from the release.
 
 `RhuanXDK/radmin-vpn-linux-rs`, an older fork of radmin-linux-rs, was already
