@@ -20,7 +20,7 @@ One command, as your normal user (it asks for your password once):
     curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Radmin-Linux/main/bootstrap.sh | bash
 
 Then open **Radmin VPN** from the app menu (or run `radmin-linux`), click the
-power button and use **Network > Join a network** (name and password, like in
+power button and use **Network > Join Network** (name and password, like in
 Radmin).
 
 * Works on Arch/Manjaro, Debian/Ubuntu/Mint, Fedora and openSUSE, x86_64.

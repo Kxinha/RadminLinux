@@ -323,8 +323,8 @@ ok "'Radmin VPN' is in the menu (or run: radmin-linux)"
 echo
 say "Radmin-Linux $VERSION installed."
 if [[ $NATIVE == 1 ]]; then
-  say "Open Radmin VPN and press the power button: the first time it creates a new Radmin identity, then use Network > Join a network."
+  say "Open Radmin VPN and press the power button: the first time it creates a new Radmin identity, then use Network > Join Network."
 elif [[ $NEW_IMAGE -eq 1 ]]; then
-  say "On the first start the VM gives itself its own Radmin identity, then join your networks with Network > Join a network."
+  say "On the first start the VM gives itself its own Radmin identity, then join your networks with Network > Join Network."
 fi
 say "Uninstall: $HOME_DIR/uninstall.sh"
