@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.1 (2026-11-25)
+
+### Fix
+* Native engine: opening the app from the menu showed "Could not prepare the
+  link to the VM ... could not create tapradmin" and did not open. The launcher
+  still checked the VM link (tapradmin), which the native engine does not use.
+  It now only checks Python and OpenRad in native mode. The VM engine is
+  unchanged.
+
 ## 0.9.0 (2026-11-25)
 
 ### Verified with official Radmin VPN

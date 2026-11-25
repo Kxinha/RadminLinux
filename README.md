@@ -116,7 +116,8 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.9.0**: verified against official Radmin
+See [CHANGELOG.md](CHANGELOG.md). **0.9.1**: the app opens again from the menu with
+the native engine (the launcher asked for the VM link). **0.9.0**: verified against official Radmin
 VPN on Windows; System > Firewall Exceptions (Allow All Apps, Add Application)
 so Windows friends can join a server you host on Linux; Create and Join buttons
 when you have no network. **0.8.0**: the window, menus, dialogs and tray

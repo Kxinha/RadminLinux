@@ -11,7 +11,7 @@ import sys
 from PySide6.QtWidgets import QApplication, QMessageBox
 app = QApplication(sys.argv)
 QMessageBox.critical(None, "Radmin VPN (Linux)",
-    "Could not prepare the link to the VM.\n\n" + sys.argv[2] +
+    "Could not start Radmin VPN.\n\n" + sys.argv[2] +
     "\n\nRun it in a terminal for details:\n  " + sys.argv[1])
 PY
   fi

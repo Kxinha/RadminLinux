@@ -28,11 +28,24 @@ err(){ echo "  [ERROR] $*" >&2; }
 step(){ [[ $QUIET -eq 0 ]] && echo "== $* =="; return 0; }
 FAIL=0
 
+NATIVE=0; [[ "${RADMIN_ENGINE:-openrad}" == "openrad" ]] && NATIVE=1
+
 step "1/4 venv"
-if [[ -x "$VENV/bin/python" ]] && "$VENV/bin/python" -c "import impacket, PySide6.QtWidgets" 2>/dev/null; then
-  ok "impacket + PySide6"
+MODS="impacket, PySide6.QtWidgets"; [[ $NATIVE -eq 1 ]] && MODS="PySide6.QtWidgets"
+if [[ -x "$VENV/bin/python" ]] && "$VENV/bin/python" -c "import $MODS" 2>/dev/null; then
+  ok "${MODS/.QtWidgets/}"
 else
   err "Python environment broken in $VENV (run install.sh again)"; FAIL=1
+fi
+
+# native engine (OpenRad): no VM, no tapradmin link; OpenRad makes its own interface
+if [[ $NATIVE -eq 1 ]]; then
+  if [[ -x "${RADMIN_OPENRAD_BIN:-/usr/local/lib/radmin-linux/openrad}" ]]; then
+    ok "native engine (OpenRad), no VM link needed"
+  else
+    err "OpenRad not found in ${RADMIN_OPENRAD_BIN:-/usr/local/lib/radmin-linux/openrad} (run install.sh again)"; FAIL=1
+  fi
+  exit $FAIL
 fi
 
 step "2/4 link $TAP"

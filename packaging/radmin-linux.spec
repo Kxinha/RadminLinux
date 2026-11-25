@@ -1,5 +1,5 @@
 Name:           radmin-linux
-Version:        0.9.0
+Version:        0.9.1
 Release:        1%{?dist}
 Summary:        Radmin VPN on Linux (native OpenRad engine or a headless VM)
 
@@ -63,6 +63,9 @@ echo "  or RADMIN_ENGINE=vm %{_datadir}/radmin-linux/install.sh /path/to/radmin-
 echo "then launch it from the menu, or run: radmin-linux"
 
 %changelog
+* Wed Nov 25 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.9.1-1
+- Native engine: launcher no longer requires the VM link
+
 * Wed Nov 25 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.9.0-1
 - Verified with official Radmin VPN; System > Firewall Exceptions for hosting on Linux
 
