@@ -13,6 +13,31 @@ and tray icon for the Radmin network (26.x.x.x), with two engines behind it:
 
 ![The Linux client](assets/screenshot.png)
 
+## Works with official Radmin VPN on Windows
+
+Tested on 2026-11-25 with the native engine against the official Radmin VPN
+app on Windows, each side with a brand new identity:
+
+| test | result |
+|---|---|
+| Windows creates a network, Linux joins it (name and password) | works, both list each other online |
+| Linux creates a network, Windows joins it from Radmin's Join Network | works |
+| ping both ways over 26.x | 4/4 each way, about 40 ms over a relay |
+| TCP and UDP from Linux to a program on Windows | works (20/20 UDP packets answered) |
+| TCP and UDP from Windows to a program on Linux | works after **System > Firewall Exceptions** (see below) |
+| Linux makes the Windows peer admin | Radmin shows Delete Network for it |
+| Windows removes the Linux peer, Linux removes the Windows peer | both sides see it at once |
+| Windows deletes its network | it disappears on Linux too |
+
+**Hosting a game on Linux.** Most distributions run a firewall (firewalld or
+ufw) that answers ping but refuses connections arriving on the VPN interface, so
+your Windows friends could see you but not join your server. Do what Radmin
+does on Windows: **System > Firewall Exceptions > Add Application** lists the
+programs waiting for connections (a Minecraft or game server, for example) and
+opens only their ports, only for VPN peers; **Allow All Apps** opens everything
+on the VPN interface. It asks for your password once and stays after reboot.
+Uninstalling removes it.
+
 ## Install
 
 One command, as your normal user (it asks for your password once):
@@ -91,7 +116,10 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.8.0**: the window, menus, dialogs and tray
+See [CHANGELOG.md](CHANGELOG.md). **0.9.0**: verified against official Radmin
+VPN on Windows; System > Firewall Exceptions (Allow All Apps, Add Application)
+so Windows friends can join a server you host on Linux; Create and Join buttons
+when you have no network. **0.8.0**: the window, menus, dialogs and tray
 look and work like Radmin VPN (power button, Join with Private and Gaming tabs,
 Create, Properties, Settings). **0.7.0**: native network admin (delete a
 network, remove members, make or remove admins), block an IP, relays only and
@@ -154,8 +182,8 @@ VM engine:
 
 ## Limits
 
-* Hosting a server **on Linux** for your Radmin friends is not supported yet:
-  the VM NATs Linux, so peers can reach the VM's 26.x address but not your PC.
+* VM engine only: hosting a server **on Linux** for your Radmin friends is not
+  supported (with the native engine it is, see Firewall Exceptions above): the VM NATs Linux, so peers can reach the VM's 26.x address but not your PC.
   Joining servers hosted by others works.
 * The image ships Radmin VPN 2.0.4899.9. Radmin 2.1 needs the Windows 7 SHA-2
   update; **System > Check for Radmin update** reports that instead of failing

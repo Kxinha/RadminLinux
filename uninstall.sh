@@ -27,6 +27,38 @@ OR_DIR=/usr/local/lib/radmin-linux
 OR_BIN="${RADMIN_OPENRAD_BIN:-$OR_DIR/openrad}"
 OR_RULE="${RADMIN_OPENRAD_POLKIT_RULE:-/etc/polkit-1/rules.d/49-radmin-linux-openrad-$USER.rules}"
 [[ -x "$OR_BIN" ]] && timeout 30 "$OR_BIN" stop >/dev/null 2>&1
+
+# undo System > Firewall Exceptions (only what the app itself opened)
+IFN="$([[ -x "$OR_BIN" ]] && timeout 10 "$OR_BIN" --json interface-name 2>/dev/null | sed -n 's/.*"interface_name":"\([A-Za-z0-9_.-]*\)".*/\1/p')"
+IFN="${IFN:-radminvpn0}"
+if command -v firewall-cmd >/dev/null && [[ "$(firewall-cmd --state 2>/dev/null)" == running ]]; then
+  z="$(firewall-cmd --permanent --get-zone-of-interface="$IFN" 2>/dev/null)"
+  if [[ "$z" == trusted || "$z" == radmin-vpn ]] || firewall-cmd --permanent --get-zones 2>/dev/null | grep -qw radmin-vpn; then
+    pkexec /bin/sh -c '
+      for z in trusted radmin-vpn; do
+        firewall-cmd --zone=$z --remove-interface="$1" >/dev/null 2>&1
+        firewall-cmd --permanent --zone=$z --remove-interface="$1" >/dev/null 2>&1
+      done
+      if firewall-cmd --permanent --get-zones | grep -qw radmin-vpn; then
+        firewall-cmd --permanent --delete-zone=radmin-vpn >/dev/null && firewall-cmd --reload >/dev/null
+      fi' sh "$IFN" || echo "could not undo the firewall exceptions (pkexec refused)"
+  fi
+fi
+FWSTATE="$CONF_DIR/firewall.json"
+if [[ -f "$FWSTATE" ]] && command -v ufw >/dev/null; then
+  CMDS="$(python3 - "$FWSTATE" <<'PY'
+import json, sys, re
+d = json.load(open(sys.argv[1]))
+for ifn, s in d.items():
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", ifn): continue
+    if s.get("allow_all"): print(f"ufw delete allow in on {ifn}")
+    for p, proto in s.get("ports", []):
+        if str(p).isdigit() and proto in ("tcp", "udp"):
+            print(f"ufw delete allow in on {ifn} to any port {p} proto {proto}")
+PY
+)"
+  [[ -n "$CMDS" ]] && { pkexec /bin/sh -c "$CMDS" >/dev/null 2>&1 || echo "could not remove the ufw rules (pkexec refused)"; }
+fi
 if [[ -e "$OR_DIR" || -e "$OR_RULE" ]] && [[ "${RADMIN_KEEP_OPENRAD:-0}" != 1 ]]; then
   if ! pkexec /bin/sh -c 'rm -f "$1"; rm -rf "$2"' sh "$OR_RULE" "$OR_DIR"; then
     echo "could not remove $OR_DIR and $OR_RULE (pkexec refused); remove them as root"

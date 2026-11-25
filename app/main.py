@@ -514,6 +514,9 @@ class MainWindow(QMainWindow):
         mb = QMenuBar(); mb.setObjectName("menubar")
         m = mb.addMenu("&System")
         m.addAction(self.actRename)
+        if NATIVE:
+            self.fwMenu = m.addMenu("Firewall Exceptions")
+            self.fwMenu.aboutToShow.connect(self._fill_fw_menu)
         m.addAction(self._act("Settings", self.do_settings))
         m.addSeparator()
         m.addAction(self._act("Exit", self._quit, tip="Disconnects and closes the app" if NATIVE
@@ -589,6 +592,16 @@ class MainWindow(QMainWindow):
         self.hint = QLabel(""); self.hint.setObjectName("hint"); self.hint.setAlignment(Qt.AlignCenter)
         self.hint.setWordWrap(True)
         outer.addWidget(self.hint)
+        # Radmin's empty state: no network yet -> Create / Join in a small box
+        self.emptyBox = QFrame(); self.emptyBox.setObjectName("box")
+        ebl = QVBoxLayout(self.emptyBox); ebl.setContentsMargins(8, 8, 8, 8); ebl.setSpacing(8)
+        for text, act in (("Create Network", self.actCreate), ("Join Network", self.actJoin)):
+            b = QPushButton(text); b.setObjectName("dlgBtn"); b.setMinimumWidth(210)
+            b.clicked.connect(act.trigger); ebl.addWidget(b)
+        self.emptyBox.hide()
+        erow = QHBoxLayout(); erow.setContentsMargins(0, 36, 0, 0)
+        erow.addStretch(1); erow.addWidget(self.emptyBox); erow.addStretch(1)
+        outer.addLayout(erow)
         outer.addStretch(1)
         self.scroll.setWidget(self.listw)
         self.scroll.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -933,6 +946,13 @@ class MainWindow(QMainWindow):
             self.listv.insertWidget(n, w)
             w.show()
         self.netPanel.setVisible(bool(widgets))
+        self._update_empty()
+
+    def _update_empty(self):
+        box = getattr(self, "emptyBox", None)
+        if box is not None:
+            box.setVisible(self._vm_running and self.netPanel.isHidden() and not self.hint.text()
+                           and self._mode == "live" and self._live is not None)
 
     def _row(self, ip, section=None):
         key = f"{section}|{ip}" if section else ip
@@ -1082,10 +1102,11 @@ class MainWindow(QMainWindow):
         and to the hint under the list while there is nothing to list."""
         self._summary = text
         clean = text.lstrip("● ").strip()
-        busy = self._vm_running and (self._mode is None or not self._live) and self._last_service == "Running"
+        busy = self._vm_running and (self._mode is None or self._live is None) and self._last_service == "Running"
         if not self._vm_running:
             clean = "" if (not NATIVE or orctl.identity()) else "Press the power button to create your Radmin identity"
         self.hint.setText(clean[:1].upper() + clean[1:] if (busy or not self._vm_running) and clean else "")
+        self._update_empty()
         self._show_notice()
 
     def _flash(self, text, secs=6.0):
@@ -1597,6 +1618,49 @@ class MainWindow(QMainWindow):
         self.nodeName.setText(ident.get("name") or ("Radmin VPN" if NATIVE else OFF_TEXT))
         self.nodeIp.setText(ip_text or ident.get("ip") or ("not registered yet" if NATIVE
                                                             else "click power to turn on"))
+
+    # ---------------------------------------------------- Firewall Exceptions
+    def _fill_fw_menu(self):
+        """Radmin's System > Firewall Exceptions: Allow All Apps or Add
+        Application, done on the Linux firewall (firewalld or ufw)."""
+        import fwctl
+        m = self.fwMenu
+        m.clear()
+        try:
+            st = fwctl.status()
+        except Exception as e:  # noqa
+            a = m.addAction(f"Firewall: {e}"); a.setEnabled(False); return
+        if not st["backend"]:
+            a = m.addAction("Linux Firewall is Off"); a.setEnabled(False)
+            return
+        allow = m.addAction("Allow All Apps"); allow.setCheckable(True); allow.setChecked(st["allow_all"])
+        allow.setToolTip("VPN peers can connect to any program on this PC (only through the VPN)")
+        allow.triggered.connect(lambda on: self._run_action(lambda: fwctl.set_allow_all(on),
+                                "Allow All Apps" if on else "Firewall: only chosen apps"))
+        sub = m.addMenu("Add Application")
+        opened = {tuple(p) for p in st["ports"]}
+        apps = fwctl.listening_apps()
+        known = set()
+        for app in apps:
+            ports = [tuple(p) for p in app["ports"]]
+            known |= set(ports)
+            txt = f"{app['name']}   " + ", ".join(f"{p}/{proto}" for p, proto in ports[:4]) + (" …" if len(ports) > 4 else "")
+            act = sub.addAction(txt); act.setCheckable(True)
+            act.setChecked(all(p in opened for p in ports))
+            act.triggered.connect(lambda on, ps=ports, n=app["name"]: self._run_action(
+                lambda: fwctl.set_ports(ps, on), f"{'Allow' if on else 'Block'} {n}"))
+        if not apps:
+            a = sub.addAction("No program is waiting for connections"); a.setEnabled(False)
+        rest = sorted(opened - known, key=lambda x: (int(x[0]), x[1]))
+        if rest:
+            sub.addSeparator()
+            for p, proto in rest:
+                act = sub.addAction(f"Port {p}/{proto}"); act.setCheckable(True); act.setChecked(True)
+                act.setToolTip("Opened before; the program is not running now. Uncheck to close it")
+                act.triggered.connect(lambda on, pp=(p, proto): self._run_action(
+                    lambda: fwctl.set_ports([pp], on), f"{'Open' if on else 'Close'} port {pp[0]}/{pp[1]}"))
+        if st["allow_all"]:
+            sub.setEnabled(False)
 
     def do_rename_inline(self):
         """System > Change Name: the name turns into a text box, like in Radmin."""

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.0 (2026-11-25)
+
+### Verified with official Radmin VPN
+* Tested the native engine against the official Radmin VPN app on Windows (new
+  identities on both sides): create and join in both directions, ping, TCP and
+  UDP both ways, grant admin, remove members, delete network. Results in the
+  README.
+
+### Firewall Exceptions (System menu, like Radmin)
+* The test found the one thing that did not work: a Windows peer could ping a
+  Linux PC but could not connect to a program on it, because firewalld (and
+  ufw) refuse connections on the VPN interface.
+* **Allow All Apps**: VPN peers can reach any program (firewalld zone
+  "trusted", or `ufw allow in on radminvpn0`).
+* **Add Application**: lists your programs waiting for connections and opens
+  only their ports, only on the VPN interface (own firewalld zone
+  "radmin-vpn", ping still answered). Checked items are open; uncheck to close.
+* Asks for the admin password, survives reboot, the uninstaller removes it.
+  Without firewalld or ufw the menu says "Linux Firewall is Off".
+
+### Window
+* No network yet: Create Network and Join Network buttons in the middle of the
+  window, as in Radmin.
+
 ## 0.8.0 (2026-11-25)
 
 The app now looks and works like Radmin VPN, with OpenRad running natively underneath.
