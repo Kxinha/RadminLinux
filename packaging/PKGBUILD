@@ -1,19 +1,22 @@
 # Maintainer: gabrielmf1998
 pkgname=radmin-linux
-pkgver=0.5.3
+pkgver=0.6.0
 pkgrel=1
-pkgdesc="Run Radmin VPN (Windows-only) on Linux via a headless VM"
+pkgdesc="Radmin VPN on Linux: native OpenRad engine, or the real Radmin in a headless VM"
 arch=('any')
-url="https://github.com/gabrielmf1998/Radmin-Linux-KDE"
+url="https://github.com/gabrielmf1998/Radmin-Linux"
 license=('MIT')
-depends=('qemu-base' 'zstd' 'networkmanager' 'socat' 'tigervnc' 'python>=3.11')
+depends=('python>=3.11' 'curl' 'iproute2' 'polkit')
+optdepends=('qemu-base: VM engine (RADMIN_ENGINE=vm)' 'zstd: VM engine' 'networkmanager: VM engine' 'socat: VM engine' 'tigervnc: VM engine, open the Radmin window')
 source=()
 package() {
   cd "$startdir/.."
   install -d "$pkgdir/usr/share/radmin-linux/vm"
   cp -r app shim agent provision "$pkgdir/usr/share/radmin-linux/"
   find "$pkgdir/usr/share/radmin-linux" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-  install -m644 env.sh "$pkgdir/usr/share/radmin-linux/"
+  install -m644 env.sh OPENRAD_VERSION "$pkgdir/usr/share/radmin-linux/"
+  install -Dm644 packaging/polkit/49-radmin-linux-openrad.rules.in \
+    "$pkgdir/usr/share/radmin-linux/packaging/polkit/49-radmin-linux-openrad.rules.in"
   install -m755 preflight.sh radmin-linux.sh deploy-agent.sh uninstall.sh \
     install.sh build-vm.sh "$pkgdir/usr/share/radmin-linux/"
   install -m755 vm/*.sh "$pkgdir/usr/share/radmin-linux/vm/"

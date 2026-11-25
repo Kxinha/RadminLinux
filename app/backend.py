@@ -197,6 +197,12 @@ def fetch_state(timeout: int = 40, allow_wmi: bool = True) -> State:
     """State of Radmin in the VM. API first; WMI only when allow_wmi and the API
     is missing (old agent)."""
     global _last
+    if config.NATIVE:
+        import orctl
+        st = orctl.fetch_state()
+        if st.ok:
+            _last = st
+        return st
     try:
         import vmctl
         if not vmctl.is_running():

@@ -1,0 +1,11 @@
+// Radmin-Linux: lets @USER@ create the OpenRad network interface without a
+// password. Only this root owned binary, only its "tap-helper" command (it
+// accepts nothing but a 26.x address and exits after creating radminvpn0),
+// only from an active local session. Remove this file to be asked every time.
+polkit.addRule(function(action, subject) {
+    if (action.id != "org.freedesktop.policykit.exec") return;
+    if (action.lookup("program") != "@BIN@") return;
+    if (!subject.local || !subject.active || subject.user != "@USER@") return;
+    var cl = action.lookup("command_line") || "";
+    if (cl.indexOf("@BIN@ tap-helper ") == 0) return polkit.Result.YES;
+});

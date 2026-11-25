@@ -10,7 +10,7 @@ import sys, os, time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QFrame, QMenuBar, QMenu, QSystemTrayIcon, QInputDialog,
-    QSizePolicy, QPushButton, QMessageBox,
+    QSizePolicy, QPushButton, QMessageBox, QLineEdit,
 )
 from PySide6.QtGui import QAction, QCursor, QDesktopServices, QGuiApplication
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
@@ -23,8 +23,19 @@ import agent
 import vmctl
 import icons
 import config
+import orctl
+if config.NATIVE:
+    # native engine: OpenRad has the same control functions as the VM
+    # (is_running, power_on, power_off, ...), so the window drives either one
+    vmctl = orctl  # noqa: F811
 import updater
 from roster import Roster
+
+NATIVE = config.NATIVE
+# words that differ between the two engines
+WHAT = "Radmin" if NATIVE else "VM"            # the thing the power button turns on
+OFF_TEXT = "Radmin is off" if NATIVE else "VM is off"
+BOOT_TEXT = "connecting to the Radmin server" if NATIVE else "VM is booting, please wait"
 
 POLL_MS = 5000     # state refresh (agent API, ~50 ms: a file read in the VM)
 PING_MS = 30000    # liveness (ping sweep) every 30s
@@ -139,7 +150,7 @@ class HealthWorker(QThread):
         self.heal = heal
 
     def run(self):
-        self.done.emit(agent.health(heal=self.heal))
+        self.done.emit(orctl.diagnostics() if NATIVE else agent.health(heal=self.heal))
 
 
 class WatchWorker(QThread):
@@ -406,8 +417,8 @@ class MainWindow(QMainWindow):
             running = False
         self._vm_running = running
         self._booting = False
-        self.nodeName.setText("Radmin VPN" if running else "VM is off")
-        self.nodeIp.setText("Refresh to query the VM" if running else "click power to turn on")
+        self.nodeName.setText("Radmin VPN" if running else OFF_TEXT)
+        self.nodeIp.setText(f"Refresh to query the {WHAT}" if running else "click power to turn on")
         self._set_badge("Manual" if running else "Off", "warn" if running else "off")
         self.power.setPixmap(icons.power_pixmap(running, 48))
         self._sync_actions(False)
@@ -416,7 +427,7 @@ class MainWindow(QMainWindow):
         self._set_mode(None)
         self._waiting = "manual mode, Refresh to query"
         self._render_peers(set())
-        self._set_summary("● manual mode, Refresh to query" + ("" if running else " · VM off"))
+        self._set_summary("● manual mode, Refresh to query" + ("" if running else f" · {OFF_TEXT}"))
 
     def _toggle_auto(self, on: bool):
         self._auto = bool(on)
@@ -447,29 +458,36 @@ class MainWindow(QMainWindow):
                 self.actAuto.setToolTip("Refresh every 15 s (one tiny request to the VM).")
                 self.actAuto.toggled.connect(self._toggle_auto); m.addAction(self.actAuto)
                 m.addSeparator()
-                self.actVmOn = QAction("Turn VM on", self)
+                self.actVmOn = QAction("Turn on" if NATIVE else "Turn VM on", self)
                 self.actVmOn.triggered.connect(self.do_vm_on); m.addAction(self.actVmOn)
-                self.actVmOff = QAction("Turn VM off", self)
+                self.actVmOff = QAction("Turn off" if NATIVE else "Turn VM off", self)
                 self.actVmOff.triggered.connect(self.do_vm_off); m.addAction(self.actVmOff)
                 m.addSeparator()
-                ah = QAction("Full diagnostics (auto-repair)", self)
+                ah = QAction("Diagnostics" if NATIVE else "Full diagnostics (auto-repair)", self)
                 ah.triggered.connect(self.do_health); m.addAction(ah)
-                au = QAction("Check for Radmin update…", self)
-                au.triggered.connect(self.do_check_update); m.addAction(au)
-                ao = QAction("Repair network (orchestrator)", self)
-                ao.triggered.connect(self.do_orchestrate); m.addAction(ao)
-                ai = QAction("Reinstall the VM agent", self)
-                ai.triggered.connect(self.do_install_agent); m.addAction(ai)
+                if NATIVE:
+                    ar = QAction("Retry the network interface", self)
+                    ar.setToolTip("Create the radminvpn0 interface again (asks for root once if the rule is missing)")
+                    ar.triggered.connect(self.do_retry_interface); m.addAction(ar)
+                else:
+                    au = QAction("Check for Radmin update…", self)
+                    au.triggered.connect(self.do_check_update); m.addAction(au)
+                    ao = QAction("Repair network (orchestrator)", self)
+                    ao.triggered.connect(self.do_orchestrate); m.addAction(ao)
+                    ai = QAction("Reinstall the VM agent", self)
+                    ai.triggered.connect(self.do_install_agent); m.addAction(ai)
                 m.addSeparator()
                 ar = QAction("Reset Radmin identity…", self)
                 ar.setToolTip("New node id and 26.x address, no networks")
+                self.actResetId = ar
                 ar.triggered.connect(self.do_reset_identity); m.addAction(ar)
                 m.addSeparator()
                 sm = m.addMenu("Settings")
                 self.actAutostart = QAction("Start with my session (in the tray)", self)
                 self.actAutostart.setCheckable(True); self.actAutostart.setChecked(autostart_enabled())
                 self.actAutostart.toggled.connect(self._toggle_autostart); sm.addAction(self.actAutostart)
-                self.actVmOnStart = QAction("Turn the VM on when the app opens", self)
+                self.actVmOnStart = QAction("Connect when the app opens" if NATIVE
+                                            else "Turn the VM on when the app opens", self)
                 self.actVmOnStart.setCheckable(True)
                 self.actVmOnStart.setChecked(bool(self.roster.get_setting("vm_on_start", False)))
                 self.actVmOnStart.toggled.connect(lambda on: self.roster.set_setting("vm_on_start", bool(on)))
@@ -487,7 +505,8 @@ class MainWindow(QMainWindow):
                 sm.addAction(self.actAutoUpd)
                 m.addSeparator()
                 q = QAction("Quit", self); q.triggered.connect(self._quit); m.addAction(q)
-                q.setToolTip("Turns the VM off and closes the app")
+                q.setToolTip("Disconnects and closes the app" if NATIVE
+                             else "Turns the VM off and closes the app")
             elif name == "Network":
                 self.actOnlineOnly = QAction("Show online only", self)
                 self.actOnlineOnly.setCheckable(True)
@@ -514,7 +533,9 @@ class MainWindow(QMainWindow):
                 self.actCreate.triggered.connect(self.do_create); m.addAction(self.actCreate)
                 m.addSeparator()
                 self.actGui = QAction("Open the Radmin window", self)
-                self.actGui.triggered.connect(self._open_vnc); m.addAction(self.actGui)
+                self.actGui.triggered.connect(self._open_vnc)
+                if not NATIVE:
+                    m.addAction(self.actGui)
             elif name == "Help":
                 a = QAction("Check for app updates…", self)
                 a.triggered.connect(lambda: self.check_app_update(manual=True)); m.addAction(a)
@@ -537,7 +558,8 @@ class MainWindow(QMainWindow):
         # declared footprint: the VM is intentionally small so it never hogs the host
         foot = QLabel(config.vm_footprint())
         foot.setStyleSheet("color:#6f8290; font-size:10px; font-weight:600;")
-        foot.setToolTip("The Windows VM uses only this much RAM/CPU — it won't hog your machine")
+        foot.setToolTip("Native OpenRad client, no Windows VM" if NATIVE else
+                        "The Windows VM uses only this much RAM/CPU — it won't hog your machine")
         hl.addWidget(foot)
         v.addWidget(header)
 
@@ -546,7 +568,7 @@ class MainWindow(QMainWindow):
         cl = QHBoxLayout(card); cl.setContentsMargins(14, 8, 14, 8); cl.setSpacing(12)
         self.power = QLabel(); self.power.setPixmap(icons.power_pixmap(False, 48))
         self.power.setCursor(QCursor(Qt.PointingHandCursor))
-        self.power.setToolTip("Click to turn the VM on / off")
+        self.power.setToolTip(f"Click to turn {'Radmin' if NATIVE else 'the VM'} on / off")
         self.power.mousePressEvent = lambda e: self.toggle_power()
         cl.addWidget(self.power)
         box = QVBoxLayout(); box.setSpacing(2)
@@ -601,19 +623,27 @@ class MainWindow(QMainWindow):
         self.trayShow = show
         menu.addSeparator()
         # full control from the tray — the user never touches the VM
-        self.trayPower = QAction("Turn VM on", self)
+        self.trayPower = QAction("Turn on" if NATIVE else "Turn VM on", self)
         self.trayPower.triggered.connect(self.toggle_power); menu.addAction(self.trayPower)
         self.trayConn = QAction("Connect / Disconnect", self)
         self.trayConn.triggered.connect(self._tray_toggle_conn); menu.addAction(self.trayConn)
+        if NATIVE:
+            # the power button is the connection: one item is enough
+            self.trayConn.setVisible(False)
         menu.addSeparator()
-        d = QAction("Full diagnostics (repair)", self); d.triggered.connect(self.do_health); menu.addAction(d)
-        u = QAction("Check for update", self); u.triggered.connect(self.do_check_update); menu.addAction(u)
-        s = QAction("Sync members", self); s.triggered.connect(self.discover_now); menu.addAction(s)
-        r = QAction("Refresh", self); r.triggered.connect(self.refresh_full); menu.addAction(r)
-        g = QAction("Open the Radmin window", self); g.triggered.connect(self._open_vnc); menu.addAction(g)
+        if NATIVE:
+            j = QAction("Join a network…", self); j.triggered.connect(self.do_join); menu.addAction(j)
+            d = QAction("Diagnostics", self); d.triggered.connect(self.do_health); menu.addAction(d)
+            r = QAction("Refresh", self); r.triggered.connect(self.refresh_full); menu.addAction(r)
+        else:
+            d = QAction("Full diagnostics (repair)", self); d.triggered.connect(self.do_health); menu.addAction(d)
+            u = QAction("Check for update", self); u.triggered.connect(self.do_check_update); menu.addAction(u)
+            s = QAction("Sync members", self); s.triggered.connect(self.discover_now); menu.addAction(s)
+            r = QAction("Refresh", self); r.triggered.connect(self.refresh_full); menu.addAction(r)
+            g = QAction("Open the Radmin window", self); g.triggered.connect(self._open_vnc); menu.addAction(g)
         menu.addSeparator()
         quit_ = QAction("Quit", self); quit_.triggered.connect(self._quit); menu.addAction(quit_)
-        quit_.setToolTip("Turns the VM off and closes the app")
+        quit_.setToolTip("Disconnects and closes the app" if NATIVE else "Turns the VM off and closes the app")
         self.trayQuit = quit_
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
@@ -628,13 +658,13 @@ class MainWindow(QMainWindow):
     def _update_tray(self):
         """Reflect the state in the tray icon, tooltip and menu."""
         if self._quitting:
-            tip, state = "Radmin VPN · turning the VM off, then quitting", "warn"
+            tip, state = f"Radmin VPN · turning {'Radmin' if NATIVE else 'the VM'} off, then quitting", "warn"
         elif not self._vm_running:
-            tip, state = "Radmin VPN · VM off", "off"
+            tip, state = f"Radmin VPN · {'off' if NATIVE else 'VM off'}", "off"
         elif self._stopping:
             tip, state = "Radmin VPN · shutting down", "warn"
         elif self._booting:
-            tip, state = "Radmin VPN · starting", "warn"
+            tip, state = "Radmin VPN · " + ("connecting" if NATIVE else "starting"), "warn"
         elif self._last_service == "Running":
             tip, state = f"Radmin VPN · online {self._node_ip} · {self._n_online} peers online", "on"
         else:
@@ -648,7 +678,8 @@ class MainWindow(QMainWindow):
             self.trayConn.setText("Disconnect" if self._last_service == "Running" else "Connect")
             self.trayConn.setEnabled(self._vm_running and not self._booting and not self._stopping)
         if hasattr(self, "trayPower"):
-            self.trayPower.setText("Turn VM off" if self._vm_running else "Turn VM on")
+            self.trayPower.setText(("Turn off" if self._vm_running else "Turn on") if NATIVE else
+                                   ("Turn VM off" if self._vm_running else "Turn VM on"))
             self.trayPower.setEnabled(not self._stopping)
 
     def _notify(self, title, text):
@@ -683,7 +714,7 @@ class MainWindow(QMainWindow):
 
     def _maybe_ensure_agent(self, st):
         """Once per boot: upgrade the in-VM agent if it is older than this app."""
-        if self._agent_checked or self._closing:
+        if self._agent_checked or self._closing or NATIVE:
             return
         if self._ensure and self._ensure.isRunning():
             return
@@ -706,7 +737,7 @@ class MainWindow(QMainWindow):
 
     def _check_identity_notice(self, st):
         note = st.identity_reset
-        if not note or note == self._identity_seen or self._closing:
+        if NATIVE or not note or note == self._identity_seen or self._closing:
             return
         self._identity_seen = note
         from PySide6.QtWidgets import QMessageBox
@@ -744,20 +775,21 @@ class MainWindow(QMainWindow):
             self._booting = bool(st.vm_running) and not self._stopping
             if not st.vm_running:
                 self._agent_checked = False
-                self.nodeName.setText("VM is off")
+                self.nodeName.setText(OFF_TEXT)
                 self.nodeIp.setText("click power to turn on")
                 self._set_badge("Off", "off")
                 self.power.setPixmap(icons.power_pixmap(False, 48))
                 # no alert when it went down on request (app, tray or bench-stop.sh)
                 if was_running and not self._user_stopped and not self._busy and not was_stopping:
-                    self._notify("Radmin VPN stopped", "The Windows VM is no longer running.")
+                    self._notify("Radmin VPN stopped", "OpenRad is no longer running." if NATIVE
+                                 else "The Windows VM is no longer running.")
                 self._was_online = False
             elif self._stopping:
                 self._show_stopping()
             else:
-                self.nodeName.setText("Starting…")
-                self.nodeIp.setText("VM is booting, please wait")
-                self._set_badge("Starting", "warn")
+                self.nodeName.setText("Connecting…" if NATIVE else "Starting…")
+                self.nodeIp.setText(BOOT_TEXT)
+                self._set_badge("Connecting" if NATIVE else "Starting", "warn")
                 self.power.setPixmap(icons.power_pixmap(True, 48))
             self._set_summary(f"● {st.error}")
             self._sync_actions(False)
@@ -771,7 +803,7 @@ class MainWindow(QMainWindow):
             if self._booting and not self._closing:
                 QTimer.singleShot(BOOT_POLL_MS, self.refresh)
                 # an old agent never brings the API up: upgrade it over WMI
-                if time.monotonic() - self._vm_started_at > 180:
+                if not NATIVE and time.monotonic() - self._vm_started_at > 180:
                     self._maybe_ensure_agent(st)
             return
 
@@ -787,7 +819,8 @@ class MainWindow(QMainWindow):
         self._node_ip = st.node_ip
         on = (st.service == "Running")
         if self._was_online and not on and not self._user_stopped and not self._busy:
-            self._notify("Radmin VPN disconnected", "The Radmin service stopped in the VM.")
+            self._notify("Radmin VPN disconnected", "OpenRad lost the Radmin server." if NATIVE
+                         else "The Radmin service stopped in the VM.")
         if on:
             self._user_stopped = False
         self._was_online = on
@@ -836,6 +869,8 @@ class MainWindow(QMainWindow):
             self._render_peers(self._ping_online | {ip for ip in arp if ip not in self._pinged})
         if not on:
             self._set_summary("● Radmin is disconnected (Network > Connect)")
+        if NATIVE:
+            self._native_warning(st)
         if first or new_peer:
             self.ping_now()
 
@@ -1104,7 +1139,10 @@ class MainWindow(QMainWindow):
             m = QMenu(self)
             m.addAction("Copy network name", lambda: (QGuiApplication.clipboard().setText(name),
                                                      self._flash(f"● {name} copied")))
-            m.addAction("Open the Radmin window", self._open_vnc)
+            if NATIVE:
+                m.addAction("Leave this network…", lambda: self._native_leave(name))
+            else:
+                m.addAction("Open the Radmin window", self._open_vnc)
             m.exec(pos)
             return
         m = QMenu(self)
@@ -1214,8 +1252,8 @@ class MainWindow(QMainWindow):
 
     # ---------- health / auto-heal (silent, in the background) ----------
     def health_now(self):
-        if self._closing or self._busy or self._quitting:
-            return
+        if self._closing or self._busy or self._quitting or NATIVE:
+            return   # OpenRad reconnects on its own; nothing to heal from here
         if self._watch and self._watch.isRunning():
             return
         # the probe (pidfile + API/ICMP) runs in a thread: never block the UI
@@ -1299,6 +1337,10 @@ class MainWindow(QMainWindow):
             "agent_tasks": "Boot agent",
             "api": "Agent API",
             "firewall": "VM firewall",
+            "openrad_service": "OpenRad connected",
+            "radmin_server": "Radmin server answers",
+            "interface": "Network interface (radminvpn0)",
+            "helper_rule": "Interface allowed without password",
         }
         linhas = []
         for c in res.get("checks", []):
@@ -1307,9 +1349,14 @@ class MainWindow(QMainWindow):
             linhas.append(f"{mark}  {nomes.get(c['name'], c['name'])}{extra}")
         titulo = "All systems OK" if res.get("all_ok") else "Problems found"
         m = QMessageBox(self)
-        m.setWindowTitle("VM diagnostics")
+        m.setWindowTitle("Diagnostics" if NATIVE else "VM diagnostics")
         m.setIcon(QMessageBox.Information if res.get("all_ok") else QMessageBox.Warning)
         m.setText(titulo + (" — auto-repaired" if res.get("healed") else ""))
+        if NATIVE:
+            cur = res.get("current") or {}
+            linhas += ["", f"OpenRad {res.get('version') or '?'}",
+                       f"{cur.get('connected_count', 0)}/{cur.get('peer_count', 0)} peers connected"
+                       + (f" · server {cur['latency_ms']} ms" if isinstance(cur.get("latency_ms"), int) else "")]
         m.setInformativeText("\n".join(linhas))
         m.exec()
         self._flash("● diagnostics: " + ("all ok" if res.get("all_ok") else "see details"))
@@ -1348,6 +1395,10 @@ class MainWindow(QMainWindow):
             self._flash(f"● {label}: ok")
         else:
             self._flash(f"● {label}: failed")
+            # OpenRad says why (wrong password, unknown network, ...): show it
+            if NATIVE and isinstance(log, str) and log.strip():
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "Radmin VPN", f"{label} failed.\n\n{log.strip()[-400:]}")
         QTimer.singleShot(1500, self.refresh)
 
     def toggle_power(self):
@@ -1368,7 +1419,7 @@ class MainWindow(QMainWindow):
             return
         self._busy = True
         self._vm_started_at = time.monotonic()   # start the watchdog grace now
-        self._flash("● turning VM on…")
+        self._flash("● connecting…" if NATIVE else "● turning VM on…")
         self.nodeName.setText("starting…")
         self._sync_actions(False)
         self._agent_checked = False
@@ -1381,7 +1432,9 @@ class MainWindow(QMainWindow):
         if self._busy or not self._vm_running:
             return
         r = QMessageBox.question(self, "Turn off Radmin VPN",
-            "This fully shuts down the VM.\nRadmin and all peers will be unavailable until you turn it back on.\n\nTurn off?")
+            ("This disconnects OpenRad and removes the radminvpn0 interface." if NATIVE else
+             "This fully shuts down the VM.") +
+            "\nRadmin and all peers will be unavailable until you turn it back on.\n\nTurn off?")
         if r != QMessageBox.Yes:
             return
         self._busy = True
@@ -1389,21 +1442,22 @@ class MainWindow(QMainWindow):
         self._stopping = True
         self._booting = False
         self._show_stopping()
-        self._set_summary("● VM shutting down")
+        self._set_summary("● disconnecting" if NATIVE else "● VM shutting down")
         self._sync_actions(False)
         self._clear_list()
         self._update_tray()
         # same as vm-stop.sh: 2 minutes for Windows to shut down, then qemu is
         # stopped (otherwise a stuck shutdown would leave the VM half off)
         self._action = ActionWorker(lambda: (
-            vmctl.power_off(timeout=120) or (vmctl.power_off_hard() and "forced"), "off"))
+            vmctl.power_off(timeout=30 if NATIVE else 120) or (vmctl.power_off_hard() and "forced"), "off"))
         self._action.done.connect(lambda ok, log: self._vm_action_done(
-            "Turning off" if ok is True else "Windows did not shut down in 2 min, VM stopped", ok))
+            "Turning off" if ok is True else ("OpenRad did not stop, process killed" if NATIVE else
+                                              "Windows did not shut down in 2 min, VM stopped"), ok))
         self._start(self._action)
 
     def _show_stopping(self):
-        self.nodeName.setText("Shutting down…")
-        self.nodeIp.setText("VM is turning off, please wait")
+        self.nodeName.setText("Disconnecting…" if NATIVE else "Shutting down…")
+        self.nodeIp.setText("removing the network interface" if NATIVE else "VM is turning off, please wait")
         self._set_badge("Stopping", "warn")
         self.power.setPixmap(icons.power_pixmap(True, 48))
 
@@ -1465,7 +1519,8 @@ class MainWindow(QMainWindow):
             "New name for this node (what other peers see):", text=cur)
         new = (new or "").strip()
         if ok and new and new != cur:
-            self._run_action(lambda: actions.rename_node(new), "Renaming node")
+            self._run_action(lambda: (orctl.rename(new) if NATIVE else actions.rename_node(new)),
+                             "Renaming node")
 
     def do_orchestrate(self):
         self._run_action(lambda: agent.orchestrate_net(), "Repairing network")
@@ -1481,14 +1536,20 @@ class MainWindow(QMainWindow):
         if self._busy or not self._vm_running:
             return
         r = QMessageBox.question(self, "Reset Radmin identity",
-            "Give this VM a brand new Radmin VPN identity?\n\n"
+            f"Give this {'PC' if NATIVE else 'VM'} a brand new Radmin VPN identity?\n\n"
             "You get a new node and a new 26.x address and leave ALL networks. "
             "Peers will see you as a new member, and you must join your networks again.")
         if r == QMessageBox.Yes:
             self._identity_seen = ""
-            self._run_action(actions.reset_identity, "Resetting identity")
+            if NATIVE:
+                name = self.nodeName.text() if self._last_service == "Running" else os.uname().nodename
+                self._run_action(lambda: orctl.reset_identity(name), "Resetting identity")
+            else:
+                self._run_action(actions.reset_identity, "Resetting identity")
 
     def do_connect(self):
+        if NATIVE:
+            return self.do_vm_on()
         self._run_action(actions.connect, "Connecting")
 
     def do_disconnect(self):
@@ -1497,9 +1558,14 @@ class MainWindow(QMainWindow):
             "Disconnect from Radmin VPN?\nPeers will be unreachable until you reconnect.")
         if r == QMessageBox.Yes:
             self._user_stopped = True
-            self._run_action(actions.disconnect, "Disconnecting")
+            if NATIVE:
+                self._run_action(lambda: (orctl.power_off(), ""), "Disconnecting")
+            else:
+                self._run_action(actions.disconnect, "Disconnecting")
 
     def do_leave(self):
+        if NATIVE:
+            return self._native_leave()
         if self._mode != "fallback":
             # the registry keeps networks you already left, so its list is not
             # the truth; Radmin's own window is
@@ -1526,10 +1592,82 @@ class MainWindow(QMainWindow):
             self._run_action(lambda: actions.leave_network(guid), "Leaving network")
 
     def do_join(self):
+        if NATIVE:
+            return self._native_join()
         self._open_gui_for("join a network")
 
     def do_create(self):
+        if NATIVE:
+            return self._native_create()
         self._open_gui_for("create a network")
+
+    # ---------- native (OpenRad) network actions ----------
+    def _native_ready(self) -> bool:
+        if self._busy:
+            return False
+        if self._last_service != "Running":
+            QMessageBox.information(self, "Radmin VPN", "Turn Radmin on first (power button).")
+            return False
+        return True
+
+    def _native_join(self):
+        if not self._native_ready():
+            return
+        name, ok = QInputDialog.getText(self, "Join a network",
+            "Network name (exactly as your friends created it, or a public network):")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        pw, ok = QInputDialog.getText(self, "Join a network",
+            f"Password for {name}\n(leave empty for a public network):",
+            QLineEdit.EchoMode.Password)
+        if not ok:
+            return
+        self._run_action(lambda: orctl.join(name, pw or ""), f"Joining {name}")
+
+    def _native_create(self):
+        if not self._native_ready():
+            return
+        name, ok = QInputDialog.getText(self, "Create network", "Network name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        pw, ok = QInputDialog.getText(self, "Create network",
+            f"Password for {name} (your friends need it to join):", QLineEdit.EchoMode.Password)
+        if not ok or not pw:
+            return
+        self._run_action(lambda: orctl.create(name, pw), f"Creating {name}")
+
+    def _native_leave(self, name=None):
+        if not self._native_ready():
+            return
+        nets = [n["name"] for n in (self._live or [])]
+        if not nets:
+            QMessageBox.information(self, "Leave network", "You are not in any network.")
+            return
+        if name is None:
+            if len(nets) == 1:
+                name = nets[0]
+            else:
+                name, ok = QInputDialog.getItem(self, "Leave network", "Which network to leave?",
+                                                nets, 0, False)
+                if not ok:
+                    return
+        r = QMessageBox.question(self, "Leave network",
+            f"Leave {name}?\n\nTo come back you need its name (and password if private).")
+        if r == QMessageBox.Yes:
+            self._run_action(lambda: orctl.leave(name), f"Leaving {name}")
+
+    def do_retry_interface(self):
+        if not self._native_ready():
+            return
+        self._run_action(orctl.retry_interface, "Retrying the network interface")
+
+    def _native_warning(self, st):
+        """The VPN is up but games will not see peers: say why, once per reason."""
+        if st.error and st.error != getattr(self, "_native_err", ""):
+            self._flash(f"● {st.error} (System > Retry the network interface)", 15)
+        self._native_err = st.error
 
     def _open_gui_for(self, action):
         from PySide6.QtWidgets import QMessageBox
@@ -1675,18 +1813,19 @@ class MainWindow(QMainWindow):
             return
         self._stopping = True
         self._show_stopping()
-        self.nodeIp.setText("the app closes when the VM is off")
-        self._set_summary("● turning the VM off, then quitting")
+        self.nodeIp.setText("the app closes when " + ("Radmin is off" if NATIVE else "the VM is off"))
+        self._set_summary("● disconnecting, then quitting" if NATIVE else "● turning the VM off, then quitting")
         self._clear_list()
         self.menuBar().setEnabled(False)
         self.power.setEnabled(False)
         if self.tray.contextMenu():
             for a in self.tray.contextMenu().actions():
                 a.setEnabled(a is self.trayShow)
-            self.trayQuit.setText("Quitting… (turning the VM off)")
+            self.trayQuit.setText("Quitting… (disconnecting)" if NATIVE else "Quitting… (turning the VM off)")
         self._update_tray()
         if not self.isVisible() and self.tray.isVisible():
-            self.tray.showMessage("Radmin VPN", "Turning the VM off. Radmin VPN closes when it is done.",
+            self.tray.showMessage("Radmin VPN", ("Disconnecting." if NATIVE else "Turning the VM off.")
+                                  + " Radmin VPN closes when it is done.",
                                   icons.logo_icon(64), 5000)
         w = ActionWorker(lambda: (vmctl.stop_everything(), ""))
         w.done.connect(lambda ok, log: QApplication.quit())
@@ -1716,6 +1855,16 @@ class MainWindow(QMainWindow):
     # ---------- misc ----------
     def _about(self):
         from PySide6.QtWidgets import QMessageBox
+        if NATIVE:
+            QMessageBox.about(self, "About",
+                f"Radmin VPN (Linux) {config.VERSION}\n"
+                f"Engine: OpenRad {orctl.version() or '?'} (native, no VM)\n\n"
+                "Talks to Radmin VPN networks with OpenRad, an open source\n"
+                "Radmin VPN client (MIT, github.com/gringoestrangeiro/openrad,\n"
+                "copy at github.com/gabrielmf1998/openrad).\n"
+                "The power button connects and creates the radminvpn0 interface.\n\n"
+                "Not affiliated with Famatech. Radmin VPN is their product.")
+            return
         QMessageBox.about(self, "About",
             f"Radmin VPN (Linux) {config.VERSION}\n"
             f"VM agent {config.agent_version()}\n\n"

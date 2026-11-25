@@ -12,7 +12,7 @@ import json, os, re, subprocess, urllib.request
 
 import config
 
-GITHUB = "gabrielmf1998/Radmin-Linux-KDE"
+GITHUB = "gabrielmf1998/Radmin-Linux"
 GITLAB = "gabriel17166/radmin-linux"
 GH_API = f"https://api.github.com/repos/{GITHUB}/releases/latest"
 GL_API = f"https://gitlab.com/api/v4/projects/{GITLAB.replace('/', '%2F')}/releases/permalink/latest"

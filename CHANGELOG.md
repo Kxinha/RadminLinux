@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.6.0 (2026-11-25)
+
+### Native engine: no VM
+* New default engine: [OpenRad](https://github.com/gabrielmf1998/openrad)
+  (copy of gringoestrangeiro/openrad, MIT), a native Radmin VPN client. The
+  same window and tray drive it through `app/orctl.py`, which runs
+  `openrad <command> --json` against the per user OpenRad service.
+* Power button and tray: turn on (registers a new identity the first time,
+  named after the PC; `RADMIN_OPENRAD_NODE_NAME` picks another name) and off
+  (removes `radminvpn0`). Quit disconnects, then exits.
+* Network > Join a network and Create network ask for the name and password in
+  the app (no Radmin window needed). The password goes to OpenRad through a
+  private file in `$XDG_RUNTIME_DIR` that is deleted right after.
+  Leave this network from the network header or the menu.
+* Rename node, Reset Radmin identity (the old profile is kept aside as
+  `openrad.old-<date>`), System > Diagnostics (service, Radmin server, interface,
+  polkit rule, peers connected, server ping) and System > Retry the network
+  interface.
+* Peers show UDP / TCP / TcpRelay and the ping time, as with the VM.
+* OpenRad errors (wrong password, unknown network) are shown in a dialog.
+  Actions sent while OpenRad reconnects (right after start or a rename) wait
+  for it instead of failing, and join/leave wait until the network list
+  really changed.
+
+### Install
+* `install.sh` picks the engine: `RADMIN_ENGINE`, else the one this install
+  used before, else the VM when a VM image is installed, else native. Existing
+  VM installs stay on the VM when they update.
+* Native install: downloads the OpenRad release from our GitHub copy (GitLab
+  copy as fallback), checks the sha256 pinned in `OPENRAD_VERSION`, installs it
+  root owned in `/usr/local/lib/radmin-linux/` and adds a per user polkit rule
+  (`49-radmin-linux-openrad-<user>.rules`) that allows only
+  `openrad tap-helper` without a password. All root steps share one pkexec
+  prompt; reinstalling the same version asks nothing. No KVM, qemu or VM image.
+* Switching to native turns the VM link `radmin-bridge` off;
+  `RADMIN_ENGINE=vm ./install.sh` turns it back on. The VM image is kept.
+* `bootstrap.sh` skips the VM image download for the native engine.
+* `uninstall.sh` stops OpenRad and removes its binary and polkit rule (one
+  pkexec). The OpenRad identity in `~/.local/state/openrad` is kept.
+* Packages: qemu, zstd, socat, NetworkManager and tigervnc are now optional
+  (VM engine only); curl, iproute2 and polkit are required.
+* The GitHub repository is now `gabrielmf1998/Radmin-Linux` (the old
+  `Radmin-Linux-KDE` URLs redirect).
+
 ## 0.5.3 (2026-11-24)
 
 * Quit (tray menu or File menu) leaves nothing behind. It turns the VM off

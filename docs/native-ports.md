@@ -1,7 +1,8 @@
 # Native Linux ports of Radmin VPN (archive)
 
-Radmin-Linux runs the real Radmin VPN inside a small Windows 7 VM. Other people
-are writing **native** Linux clients that speak the Radmin protocol directly,
+Radmin-Linux started by running the real Radmin VPN inside a small Windows 7 VM
+(still available as the VM engine). Other people are writing **native** Linux
+clients that speak the Radmin protocol directly,
 with no VM. This page keeps a copy of those projects so the work is never lost
 and never has to start from zero.
 
@@ -46,7 +47,7 @@ What was checked before copying, without running anything on the real network:
   telemetry were found in `src/` and `desktop/src/`.
 * **Root.** Only the short `openrad tap-helper` runs as root, through `sudo -n`
   or `pkexec`. It refuses addresses outside 26.0.0.0/8, opens `/dev/net/tun`,
-  creates the `openrad` TAP interface (not persistent), sets the 26.x address and
+  creates the `radminvpn0` TAP interface (not persistent), sets the 26.x address and
   two routes with `/usr/bin/ip`, hands the descriptor back over a Unix socket and
   exits. Closing the app removes the interface. An existing interface is never
   touched.
@@ -59,8 +60,35 @@ What was checked before copying, without running anything on the real network:
   `cargo test` passed 407 tests. Two failed only because the sandbox has no
   network route (they need a non loopback local address).
 
-Not checked yet: a live test against real Radmin peers, the Android app, the
-Minecraft plugin and mod, and the Go server.
+Live test (2026-11-24 and 25, new test identity, a public network):
+
+* The service registered a new node and joined the network. 54 of 97 members
+  connected within about 20 s: 36 direct UDP, 8 direct TCP, 10 through the
+  Radmin relay.
+* `radminvpn0` came up with the 26.x address. ICMP ping to peers: 23 ms over
+  UDP, 28 ms over TCP, 291 ms through the relay, 0% loss.
+* rename, search, leave, join, a wrong password and an unknown network (clear
+  errors), ping and stop all worked from the CLI and from the Radmin-Linux app.
+  Leave and join are applied a moment after their reply, and actions sent while
+  the service reconnects answer "retry shortly"; the app waits for both.
+
+Not checked yet: the Android app, the Minecraft plugin and mod, and the Go
+server.
+
+## OpenRad as the Radmin-Linux native engine (0.6.0)
+
+Since 0.6.0 Radmin-Linux uses OpenRad as its default engine (see the README).
+The installer takes the `openrad` binary from the official release copied to
+[gabrielmf1998/openrad](https://github.com/gabrielmf1998/openrad/releases)
+(GitLab copy as fallback), version and sha256 pinned in
+[`OPENRAD_VERSION`](../OPENRAD_VERSION), and installs it root owned in
+`/usr/local/lib/radmin-linux/openrad`. Root ownership matters: the polkit rule
+(`packaging/polkit/`) lets the user run only that path with `tap-helper` as the
+first argument, so the user cannot swap the binary that runs as root.
+
+To move to a newer OpenRad: mirror its release (section below), check what
+changed in `tap-helper`, put the new tag and the sha256 of
+`openrad-<tag>-linux-x86_64.tar.gz` in `OPENRAD_VERSION`, test, release.
 
 ## Rebuilding OpenRad from the copy
 

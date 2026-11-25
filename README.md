@@ -1,44 +1,76 @@
 # Radmin VPN on Linux (unofficial)
 
-Radmin VPN only exists for Windows. This project runs the **real** Radmin VPN
-inside a tiny headless Windows VM and gives you a native Linux window and tray
-icon for it. Your Linux games and apps reach the Radmin network (26.x.x.x)
-directly; you never have to look at Windows.
+Radmin VPN only exists for Windows. This project gives you a native Linux window
+and tray icon for the Radmin network (26.x.x.x), with two engines behind it:
+
+* **Native (default since 0.6.0)**: [OpenRad](https://github.com/gabrielmf1998/openrad),
+  an open source (MIT) Radmin VPN client written in Rust by
+  [gringoestrangeiro](https://github.com/gringoestrangeiro/openrad). No VM, no
+  Windows, about 6 MB. It creates a `radminvpn0` network interface with your
+  26.x address, so Linux games and apps reach the Radmin peers directly.
+* **VM**: the **real** Radmin VPN inside a tiny headless Windows VM. Pick it
+  with `RADMIN_ENGINE=vm`. Installs from before 0.6.0 stay on it.
 
 ![The Linux client](assets/screenshot.png)
 
 ## Install
 
-One command, as your normal user (it asks for your password once, for the
-system packages):
+One command, as your normal user (it asks for your password once):
 
-    curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Radmin-Linux-KDE/main/bootstrap.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Radmin-Linux/main/bootstrap.sh | bash
 
 Then open **Radmin VPN** from the app menu (or run `radmin-linux`), click the
-power button and use **Network > Join a network**.
+power button and use **Network > Join a network** (name and password, like in
+Radmin).
 
-* Works on Arch/Manjaro, Debian/Ubuntu/Mint, Fedora and openSUSE.
-* Needs a CPU with virtualization enabled in the BIOS (VT-x / AMD-V), about
-  **12 GB free disk** during the install (9 GB after) and NetworkManager.
-* The download (about 3 GB) shows a progress bar, is checked against the release
-  checksums and **resumes** if it stops: just run the same command again.
-  Nothing big goes to `/tmp`.
+* Works on Arch/Manjaro, Debian/Ubuntu/Mint, Fedora and openSUSE, x86_64.
+* The native engine downloads only the app and OpenRad (a few MB, checked
+  against a pinned sha256). It installs OpenRad root owned in
+  `/usr/local/lib/radmin-linux/` and a polkit rule that lets **your user** start
+  only `openrad tap-helper` (the short root step that creates `radminvpn0`)
+  without a password. Without the rule (`RADMIN_NO_POLKIT_RULE=1`) every
+  connect asks for your password.
 * **Updates**: Help > Check for app updates (the app also checks once a day
-  and tells you). Running the curl command again does the same. Both keep
-  your VM and your Radmin identity and download only the app.
+  and tells you). Running the curl command again does the same.
 
 Options go on the bash side of the pipe, e.g. `curl ... | RADMIN_MIRROR=gitlab bash`:
 
 | option | what it does |
 |---|---|
+| `RADMIN_ENGINE=vm` | the real Radmin in a Windows VM instead of OpenRad (`openrad` switches back) |
 | `RADMIN_MIRROR=gitlab` | download from the [GitLab mirror](https://gitlab.com/gabriel17166/radmin-linux) |
-| `RADMIN_VERSION=0.3.0` | a specific release instead of the latest |
-| `RADMIN_NEW_IMAGE=1` | download a fresh VM image even if one is installed |
-| `RADMIN_VM_IMAGE=/path/file.qcow2.zst` | use an image you already have |
+| `RADMIN_VERSION=0.6.0` | a specific release instead of the latest |
+| `RADMIN_NEW_IMAGE=1` | VM engine: download a fresh VM image even if one is installed |
+| `RADMIN_VM_IMAGE=/path/file.qcow2.zst` | VM engine: use an image you already have |
 
 Uninstall: `~/.local/share/radmin-linux/uninstall.sh` (add `--keep-image` to keep the VM).
 
-## Your own Radmin identity
+### Native engine, good to know
+
+* **New identity.** OpenRad cannot read the identity of the official Radmin, so
+  the first power on registers a new node (new 26.x address). Join your
+  networks again; friends see you as a new member. The identity lives in
+  `~/.local/state/openrad` and survives uninstall and reinstall.
+* **One engine at a time.** Both use 26.0.0.0/8. Switching to native turns the
+  VM link (`radmin-bridge`) off; `RADMIN_ENGINE=vm` turns it back on. Your VM
+  image is never touched.
+* **Not the official client.** OpenRad is a third party reimplementation of the
+  Radmin protocol, not made or supported by Famatech, and the
+  [Radmin VPN EULA](https://www.radmin-vpn.com/eula/) forbids reverse
+  engineering the official client. Use it knowing that.
+* Peers show **UDP** / **TCP** (direct) or **TcpRelay** like in Radmin, with the
+  ping time. **System > Diagnostics** checks the service, the Radmin server,
+  `radminvpn0` and the polkit rule.
+
+### VM engine
+
+* Needs a CPU with virtualization enabled in the BIOS (VT-x / AMD-V), about
+  **12 GB free disk** during the install (9 GB after) and NetworkManager.
+* The download (about 3 GB) shows a progress bar, is checked against the release
+  checksums and **resumes** if it stops: just run the same command again.
+  Nothing big goes to `/tmp`. Updates keep your VM and your Radmin identity.
+
+## Your own Radmin identity (VM engine)
 
 Radmin keeps the node identity (node id, 26.x address, network list) inside
 Windows. The VM image of **0.1.0 shipped with the builder's identity**, so
@@ -59,7 +91,9 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.5.3**: Quit turns the VM off
+See [CHANGELOG.md](CHANGELOG.md). **0.6.0**: native engine (OpenRad), no VM:
+the same window and tray drive it, with join, create, leave, rename and
+diagnostics. **0.5.3**: Quit turns the VM off
 and closes everything, nothing keeps running after it. **0.5.2**: "Shutting down" while the VM
 turns off (it said "Starting"). **0.5.1**: the list stays empty until the
 Radmin window has been read (no old peers or networks you left), and the VM
@@ -74,6 +108,18 @@ per install, instant window (agent API), VM at about 2% of one core, clean
 VNC picture, firewall in the VM, a curl installer that resumes and verifies.
 
 ## How it works
+
+Native engine:
+
+    Linux app ──openrad CLI (JSON)──▶ OpenRad service (your user) ──▶ Radmin servers and peers
+                                          │ pkexec, polkit rule
+                                          └─▶ openrad tap-helper (root, exits) ─▶ radminvpn0 26.x/8
+
+The app (`app/orctl.py`) runs `openrad <command> --json`; the per user OpenRad
+service keeps the connection and answers over a private Unix socket in a few
+ms. Only the helper runs as root, and only long enough to create the interface.
+
+VM engine:
 
     Linux app ──HTTP (API) / WMI──▶ Windows VM (1 GB, 1 CPU, headless) ──▶ real Radmin VPN
         │                              │  ICS shares the Radmin adapter
@@ -114,15 +160,17 @@ VNC picture, firewall in the VM, a curl installer that resumes and verifies.
 
 ## Native ports (no VM)
 
-Other people are writing native Linux Radmin clients, OpenRad being the most
-complete. Copies of those projects, their releases and a review of OpenRad are
-kept in [docs/native-ports.md](docs/native-ports.md).
+Other people are writing native Linux Radmin clients, OpenRad (the native
+engine above) being the most complete. Copies of those projects, their releases
+and a review of OpenRad are kept in [docs/native-ports.md](docs/native-ports.md).
 
 ## Troubleshooting
 
 | what | where |
 |---|---|
-| check and repair everything | `~/.local/share/radmin-linux/preflight.sh` |
+| native: what OpenRad sees | `/usr/local/lib/radmin-linux/openrad status` (or `diagnostics`) |
+| native: OpenRad logs | `~/.local/share/OpenRad/logs/` |
+| VM: check and repair everything | `~/.local/share/radmin-linux/preflight.sh` |
 | install log | `~/.local/share/radmin-linux/install.log` |
 | VM console (the Windows screen) | Network > Open the Radmin window |
 | VM diagnostics with repair | System > Full diagnostics |
@@ -159,5 +207,6 @@ image (`bootstrap.sh` fetches it from the release named there).
     vm/          run / stop / view the VM
     bootstrap.sh install.sh uninstall.sh preflight.sh radmin-linux.sh deploy-agent.sh build-vm.sh
 
-Not affiliated with Famatech. Radmin VPN is their product and is downloaded
-from their site.
+Not affiliated with Famatech. Radmin VPN is their product; the VM engine
+downloads it from their site. OpenRad is MIT licensed by its authors; its
+license is installed next to the binary.

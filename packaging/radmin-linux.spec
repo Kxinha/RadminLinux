@@ -1,17 +1,20 @@
 Name:           radmin-linux
-Version:        0.5.3
+Version:        0.6.0
 Release:        1%{?dist}
-Summary:        Run Radmin VPN (Windows-only) on Linux via a headless VM
+Summary:        Radmin VPN on Linux (native OpenRad engine or a headless VM)
 
 License:        MIT
-URL:            https://github.com/gabrielmf1998/Radmin-Linux-KDE
+URL:            https://github.com/gabrielmf1998/Radmin-Linux
 BuildArch:      noarch
 
-Requires:       qemu-system-x86-core
-Requires:       qemu-img
-Requires:       zstd
-Requires:       NetworkManager
-Requires:       socat
+Requires:       curl
+Requires:       iproute
+Requires:       polkit
+Suggests:       qemu-system-x86-core
+Suggests:       qemu-img
+Suggests:       zstd
+Suggests:       NetworkManager
+Suggests:       socat
 Requires:       python3 >= 3.11
 Requires:       python3-pip
 Recommends:     tigervnc
@@ -31,7 +34,8 @@ rm -rf %{buildroot}
 install -d %{buildroot}%{_datadir}/radmin-linux
 cp -r %{srcdir}/app %{srcdir}/shim %{srcdir}/agent %{buildroot}%{_datadir}/radmin-linux/
 find %{buildroot}%{_datadir}/radmin-linux -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-install -m644 %{srcdir}/env.sh %{buildroot}%{_datadir}/radmin-linux/
+install -m644 %{srcdir}/env.sh %{srcdir}/OPENRAD_VERSION %{buildroot}%{_datadir}/radmin-linux/
+install -Dm644 %{srcdir}/packaging/polkit/49-radmin-linux-openrad.rules.in %{buildroot}%{_datadir}/radmin-linux/packaging/polkit/49-radmin-linux-openrad.rules.in
 install -m755 %{srcdir}/preflight.sh %{srcdir}/radmin-linux.sh %{srcdir}/uninstall.sh \
         %{srcdir}/deploy-agent.sh %{srcdir}/install.sh %{srcdir}/build-vm.sh \
         %{buildroot}%{_datadir}/radmin-linux/
@@ -54,10 +58,14 @@ done
 
 %post
 echo "Radmin-Linux installed. Finish the per-user setup with:"
-echo "  %{_datadir}/radmin-linux/install.sh /path/to/radmin-linux-base.qcow2.zst"
+echo "  %{_datadir}/radmin-linux/install.sh      (native engine, OpenRad)"
+echo "  or RADMIN_ENGINE=vm %{_datadir}/radmin-linux/install.sh /path/to/radmin-linux-base.qcow2.zst"
 echo "then launch it from the menu, or run: radmin-linux"
 
 %changelog
+* Wed Nov 25 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.6.0-1
+- Native engine (OpenRad), no VM needed
+
 * Tue Nov 24 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.5.3-1
 - Quit turns the VM off, closes the VM viewers, then exits
 

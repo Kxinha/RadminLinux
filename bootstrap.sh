@@ -2,16 +2,19 @@
 # ============================================================
 #  bootstrap.sh - one command install / upgrade:
 #
-#    curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Radmin-Linux-KDE/main/bootstrap.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/Radmin-Linux/main/bootstrap.sh | bash
 #
-#  Downloads the latest release (code; the VM image from the release named in
-#  IMAGE_VERSION), checks every image part against SHA256SUMS, runs install.sh.
+#  Downloads the latest release and runs install.sh. The default engine is
+#  native (OpenRad, no VM, no image download). With RADMIN_ENGINE=vm, or when a
+#  VM install is already there, it also gets the VM image from the release named
+#  in IMAGE_VERSION and checks every part against SHA256SUMS.
 #   * downloads go to ~/.local/share/radmin-linux/.download (real disk, never
 #     /tmp, which is RAM on most distros) and RESUME if the connection drops:
 #     just run the same command again
 #   * an installed VM image is kept (your Radmin identity); upgrades only
 #     replace the app
 #  Options (put them before "bash": ... | RADMIN_MIRROR=gitlab bash):
+#    RADMIN_ENGINE=vm        the real Radmin in a Windows VM instead of OpenRad
 #    RADMIN_MIRROR=gitlab    download from the GitLab mirror
 #    RADMIN_VERSION=0.3.0    a specific release instead of the latest
 #    RADMIN_NEW_IMAGE=1      download a fresh VM image even if one is installed
@@ -22,7 +25,7 @@
 set -euo pipefail
 
 main() {
-  local GH_REPO="gabrielmf1998/Radmin-Linux-KDE"
+  local GH_REPO="gabrielmf1998/Radmin-Linux"
   local GL_REPO="https://gitlab.com/gabriel17166/radmin-linux"
   local DEST="${RADMIN_HOME:-$HOME/.local/share/radmin-linux}"
   local DL="$DEST/.download"
@@ -81,6 +84,21 @@ main() {
   rm -rf "$DL/src"; mkdir -p "$DL/src"
   tar xzf "$DL/src.tar.gz" -C "$DL/src" --strip-components=1 || die "the code archive is damaged"
   rm -f "$DL/src.tar.gz"
+
+  # ---- engine ----
+  local conf="${XDG_CONFIG_HOME:-$HOME/.config}/radmin-linux/config.env" engine="${RADMIN_ENGINE:-}"
+  [[ -z "$engine" && -f "$conf" ]] && engine="$(sed -n 's/^RADMIN_ENGINE=//p' "$conf" | tail -1)"
+  [[ -z "$engine" && ( -f "$DEST/vm/bench.qcow2" || -n "${RADMIN_VM_IMAGE:-}" ) ]] && engine=vm
+  [[ -z "$engine" ]] && engine=openrad
+  [[ -f "$DL/src/OPENRAD_VERSION" ]] || engine=vm      # releases before 0.6 have no native engine
+  export RADMIN_ENGINE="$engine"
+  if [[ "$engine" == openrad ]]; then
+    say "Installing (native engine: OpenRad, no VM)"
+    bash "$DL/src/install.sh"
+    rm -rf "$DL"
+    say "Done. Open 'Radmin VPN' from the menu, or run: radmin-linux"
+    return 0
+  fi
 
   # the VM image is not re-uploaded with every app release: IMAGE_VERSION in the
   # code names the release that carries it (older releases: their own)

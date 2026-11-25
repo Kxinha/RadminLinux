@@ -3,7 +3,7 @@
 # from the GitHub Release). Mirrors the .rpm layout. Needs: dpkg-deb.
 set -euo pipefail
 SELF="$(cd "$(dirname "$0")/.." && pwd)"
-VER="${VER:-0.5.3}"
+VER="${VER:-0.6.0}"
 OUT="${1:-$SELF/packaging/dist}"
 command -v dpkg-deb >/dev/null || { echo "need dpkg-deb (install dpkg)"; exit 1; }
 
@@ -15,7 +15,9 @@ mkdir -p "$PKG/DEBIAN" "$PKG/usr/share/radmin-linux/vm" \
 # ---- code ----
 cp -r "$SELF/app" "$SELF/shim" "$SELF/agent" "$PKG/usr/share/radmin-linux/"
 find "$PKG/usr/share/radmin-linux" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-install -m644 "$SELF/env.sh" "$PKG/usr/share/radmin-linux/"
+install -m644 "$SELF/env.sh" "$SELF/OPENRAD_VERSION" "$PKG/usr/share/radmin-linux/"
+install -Dm644 "$SELF/packaging/polkit/49-radmin-linux-openrad.rules.in" \
+        "$PKG/usr/share/radmin-linux/packaging/polkit/49-radmin-linux-openrad.rules.in"
 install -m755 "$SELF/preflight.sh" "$SELF/radmin-linux.sh" "$SELF/uninstall.sh" \
         "$SELF/deploy-agent.sh" "$SELF/install.sh" "$SELF/build-vm.sh" \
         "$PKG/usr/share/radmin-linux/"
@@ -34,11 +36,11 @@ Version: $VER
 Section: net
 Priority: optional
 Architecture: all
-Depends: qemu-system-x86, qemu-utils, zstd, network-manager, socat, python3, python3-venv, python3-pip, policykit-1
-Recommends: tigervnc-viewer
+Depends: python3, python3-venv, python3-pip, curl, iproute2, pkexec | policykit-1
+Suggests: qemu-system-x86, qemu-utils, zstd, network-manager, socat, tigervnc-viewer
 Maintainer: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
-Homepage: https://github.com/gabrielmf1998/Radmin-Linux-KDE
-Description: Run Radmin VPN (Windows-only) on Linux via a headless VM
+Homepage: https://github.com/gabrielmf1998/Radmin-Linux
+Description: Radmin VPN on Linux (native OpenRad engine or a headless VM)
  Radmin VPN (Linux) drives the real Radmin VPN running inside a tiny headless
  Windows VM (1 GB RAM / 1 CPU), from a native Qt front-end. The user never
  opens the VM: the app powers it on/off, shows the mesh, connects/disconnects
@@ -50,7 +52,8 @@ cat > "$PKG/DEBIAN/postinst" <<'POST'
 #!/bin/sh
 set -e
 echo "Radmin-Linux installed. Finish the per-user setup with:"
-echo "  /usr/share/radmin-linux/install.sh /path/to/radmin-linux-base.qcow2.zst"
+echo "  /usr/share/radmin-linux/install.sh      (native engine, OpenRad)"
+echo "  or RADMIN_ENGINE=vm /usr/share/radmin-linux/install.sh /path/to/radmin-linux-base.qcow2.zst"
 echo "then launch it from the menu, or run: radmin-linux"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q /usr/share/icons/hicolor || true
