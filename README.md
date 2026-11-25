@@ -112,6 +112,12 @@ VNC picture, firewall in the VM, a curl installer that resumes and verifies.
   silently.
 * Starting the VM takes about 10 to 60 s.
 
+## Native ports (no VM)
+
+Other people are writing native Linux Radmin clients, OpenRad being the most
+complete. Copies of those projects, their releases and a review of OpenRad are
+kept in [docs/native-ports.md](docs/native-ports.md).
+
 ## Troubleshooting
 
 | what | where |
