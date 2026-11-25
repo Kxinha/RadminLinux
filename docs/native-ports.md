@@ -28,7 +28,7 @@ published by their own authors; read their licenses and notes before using them.
 Every upstream release is copied to the **Releases** page of both copies, with a
 note on top linking the original release. Copied on 2026-11-24 (OpenRad up to
 v2.4.5).
-GitLab release uploads stop near 100 MB, so the two AppImages above that size
+GitLab release uploads stop near 100 MB, so the AppImage above that size
 (radmin-on-linux v0.1.0) is in its GitLab copy's
 **Package Registry** and linked from the release.
 
