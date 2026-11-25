@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.8.0 (2026-11-25)
+
+The app now looks and works like Radmin VPN, with OpenRad running natively underneath.
+
+### Main window
+* Radmin's dark blue palette, its title bar, the round power button (ON/OFF),
+  your name, IP and an Online badge on top.
+* Networks are blue pills, members are rows with green signal bars (grey with an
+  x when offline). Hover a member for its IP, status, channel and ping.
+* Menus like Radmin: System (Change Name, Settings, Exit), Network (Create
+  Network Ins, Join Network +), Help (Help F1, View Log, Report a Bug, Request a
+  Feature, Check for Updates, About). F5 refreshes.
+* Change Name edits the name in place, as in Radmin (Enter saves, Esc cancels).
+
+### Dialogs
+* Join Network with the Private Network and Gaming Network tabs. Gaming searches
+  the public networks and shows how many members each has.
+* Create Network with name, password and confirmation; Create stays disabled
+  until it is valid.
+* Network Properties and member Properties (role, connection status, channel).
+  Admins change a member's role there; "Block traffic (Linux)" blocks an IP.
+* Settings with General, Advanced and Notifications pages and On/Off switches.
+  The Linux extras (relays only, retry failed peers, blocked addresses,
+  diagnostics, reset identity) live in Advanced.
+
+### Right click menus
+* Network: Leave Network, Delete Network (admins), Copy Network Name, Properties.
+* Member: Copy IP Address, Ping (opens a terminal), Remove, Grant or Revoke
+  Admin Rights (admins), Properties. Double click opens Properties.
+* Empty area: Create Network, Join Network.
+* Tray: Open, Go Online or Go Offline, Exit.
+
+### Not there, because OpenRad does not have it
+* Chat, Disable Network, Radmin Server items, changing network parameters or
+  password, firewall exceptions, IPv6.
+
 ## 0.7.0 (2026-11-25)
 
 Native engine (OpenRad): what the official Radmin window did, now in the app.

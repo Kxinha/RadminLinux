@@ -82,6 +82,16 @@ def has_identity() -> bool:
     return (data_dir() / "profile" / "identity.json").exists()
 
 
+def identity() -> dict:
+    """{"name", "ip"} of this profile, read from identity.json (only these two
+    fields; the credential in it is never touched). {} before the first start."""
+    try:
+        d = json.loads((data_dir() / "profile" / "identity.json").read_text())
+        return {"name": str(d.get("node_name") or ""), "ip": str(d.get("vip") or "")}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
 def data_dir() -> Path:
     if config.OPENRAD_DATA:
         return Path(config.OPENRAD_DATA)

@@ -10,10 +10,10 @@ import sys, os, time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QFrame, QMenuBar, QMenu, QSystemTrayIcon, QInputDialog,
-    QSizePolicy, QPushButton, QMessageBox, QLineEdit,
+    QSizePolicy, QPushButton, QMessageBox, QLineEdit, QSizeGrip, QComboBox, QDialog,
 )
-from PySide6.QtGui import QAction, QCursor, QDesktopServices, QGuiApplication
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QGuiApplication, QKeySequence
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl, QEvent
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -22,6 +22,7 @@ import actions
 import agent
 import vmctl
 import icons
+import radui
 import config
 import orctl
 if config.NATIVE:
@@ -192,35 +193,33 @@ def _api_num(v) -> int:
 
 
 class NetHeader(QFrame):
-    """Collapsible network-section header: click toggles, right-click manages."""
+    """Radmin's network pill: ▼ name, click folds it, right click manages it."""
     def __init__(self, gid, name, count, collapsed, on_toggle, on_menu):
         super().__init__()
         self.gid = gid
-        self.setProperty("class", "netHeader")
         self.setObjectName("netHeader")
-        self.setFixedHeight(28)
-        self.setCursor(QCursor(Qt.PointingHandCursor))
-        lay = QHBoxLayout(self); lay.setContentsMargins(10, 2, 10, 2); lay.setSpacing(6)
-        self.arrow = QLabel("▶" if collapsed else "▼")
-        self.arrow.setStyleSheet("color:#7f8c93; font-size:10px;")
+        self.setFixedHeight(24)
+        lay = QHBoxLayout(self); lay.setContentsMargins(9, 0, 10, 0); lay.setSpacing(6)
+        self.arrow = QLabel(); self.arrow.setStyleSheet("color:#ffffff; font-size:10px;")
         lay.addWidget(self.arrow)
-        self.nm = QLabel(name); self.nm.setProperty("class", "netHeaderName")
-        lay.addWidget(self.nm)
-        self.cnt = QLabel(f"· {count}"); self.cnt.setProperty("class", "netHeaderCount")
+        self.nm = QLabel(); self.nm.setProperty("class", "netHeaderName")
+        lay.addWidget(self.nm, 1)
+        self.cnt = QLabel(); self.cnt.setProperty("class", "netHeaderCount")
         lay.addWidget(self.cnt)
-        lay.addStretch(1)
         self._on_toggle = on_toggle
         self._on_menu = on_menu
+        self.update_info(name, count, collapsed)
 
     def update_info(self, name, count, collapsed):
         self.nm.setText(name)
-        self.cnt.setText(f"· {count}")
+        self.cnt.setText("")          # Radmin shows no counter here (tooltip has it)
+        self.setToolTip(f"{name} · {count} online")
         self.arrow.setText("▶" if collapsed else "▼")
 
     def mousePressEvent(self, e):
         if e.button() == Qt.RightButton and self._on_menu:
             self._on_menu(self.gid, e.globalPosition().toPoint())
-        else:
+        elif e.button() == Qt.LeftButton:
             self._on_toggle(self.gid)
 
 
@@ -229,30 +228,31 @@ def _repolish(w):
 
 
 class PeerRow(QFrame):
-    """One peer. Rows are reused across refreshes: set_state() only touches what
-    changed, so a refresh no longer rebuilds hundreds of widgets."""
-    def __init__(self, ip, on_rename, on_menu=None, key=None):
+    """One member, as in Radmin: signal bars, name, IP on the right. Rows are
+    reused across refreshes: set_state() only touches what changed."""
+    def __init__(self, ip, on_rename, on_menu=None, key=None, on_select=None):
         super().__init__()
         self.ip = ip
         self.key = key or ip      # the same peer can be in two networks
         self._on_menu = on_menu
         self._on_rename = on_rename
+        self._on_select = on_select
         self.setObjectName("peerRow")
         self.setAttribute(Qt.WA_Hover, True)
-        self.setFixedHeight(34)
+        self.setFixedHeight(22)
         self._online = None
         self._label = None
         self._rtt = None
         self._via = None
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 4, 12, 4)
-        lay.setSpacing(8)
+        lay.setContentsMargins(14, 0, 12, 0)
+        lay.setSpacing(5)
         self.sig = QLabel(); self.sig.setFixedWidth(20)
         lay.addWidget(self.sig)
         self.nameLbl = QLabel(); self.nameLbl.setProperty("class", "peerName")
         lay.addWidget(self.nameLbl, 1)
-        self.rttLbl = QLabel(); self.rttLbl.setProperty("class", "peerRtt")
-        lay.addWidget(self.rttLbl)
+        self.rttLbl = QLabel()       # kept for the code that reads it; Radmin shows no ping here
+        self.rttLbl.hide()
         self.ipLbl = QLabel(ip); self.ipLbl.setProperty("class", "peerIp")
         self.ipLbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(self.ipLbl)
@@ -260,7 +260,7 @@ class PeerRow(QFrame):
     def set_state(self, label, online, rtt=None, via=""):
         if online != self._online:
             self._online = online
-            self.sig.setPixmap(icons.signal_pixmap(online, 18))
+            self.sig.setPixmap(icons.signal_pixmap(online, 16))
             self.nameLbl.setProperty("off", not online)
             _repolish(self.nameLbl)
         if label != self._label:
@@ -268,22 +268,33 @@ class PeerRow(QFrame):
             self.nameLbl.setText(label)
         rtt = rtt if online else None
         via = via if online else ""
-        if rtt != self._rtt or via != self._via:
+        if rtt != self._rtt or via != self._via or self.toolTip() == "":
             self._rtt = rtt
             self._via = via
-            relay = via.lower() == "tcprelay"
-            txt = "" if rtt is None else (f"{rtt:.0f} ms" if rtt >= 1 else "<1 ms")
-            if relay:
-                txt = (txt + " · relay") if txt else "relay"
-            self.rttLbl.setText(txt)
-            how = {"udp": "direct (UDP)", "tcp": "direct (TCP)", "tcprelay": "through a Radmin relay"}.get(via.lower(), "")
-            self.setToolTip(f"{self.ip}" + ("" if rtt is None else f" · ping {rtt:.1f} ms")
-                            + (f" · {how}" if how else ""))
+            how = {"udp": "UDP", "tcp": "TCP", "tcprelay": "TCP relay"}.get(via.lower(), "")
+            tip = [f"{label}", f"IPv4: {self.ip}", "Status: " + ("Online" if online else "Offline")]
+            if how:
+                tip.append(f"Channel type: {how}")
+            if rtt is not None:
+                tip.append(f"Ping: {rtt:.0f} ms" if rtt >= 1 else "Ping: <1 ms")
+            self.setToolTip("\n".join(tip))
+
+    def set_selected(self, on):
+        if bool(self.property("sel")) != on:
+            self.setProperty("sel", on)
+            _repolish(self)
+
+    def mousePressEvent(self, e):
+        if self._on_select:
+            self._on_select(self.key)
+        super().mousePressEvent(e)
 
     def mouseDoubleClickEvent(self, e):
-        self._on_rename(self.ip)
+        self._on_rename(self.ip, self.key)
 
     def contextMenuEvent(self, e):
+        if self._on_select:
+            self._on_select(self.key)
         if self._on_menu:
             self._on_menu(self.ip, e.globalPos(), self.key)
 
@@ -294,7 +305,9 @@ class MainWindow(QMainWindow):
         self.roster = Roster()
         self.setWindowTitle("Radmin VPN")
         self.setWindowIcon(icons.logo_icon(64))
-        self.resize(300, 480)
+        self.resize(330, 540)
+        self.setMinimumSize(300, 330)
+        self._sel_key = None
         self._fetcher = None
         self._pinger = None
         self._action = None
@@ -352,7 +365,6 @@ class MainWindow(QMainWindow):
         self._update_offer = None
         self._build()
         self.actSync.setVisible(False)          # only for old agents (fallback)
-        self.addNetBtn.setToolTip("Join or create a Radmin network")
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.pingtimer = QTimer(self)
@@ -420,10 +432,9 @@ class MainWindow(QMainWindow):
             running = False
         self._vm_running = running
         self._booting = False
-        self.nodeName.setText("Radmin VPN" if running else OFF_TEXT)
-        self.nodeIp.setText(f"Refresh to query the {WHAT}" if running else "click power to turn on")
-        self._set_badge("Manual" if running else "Off", "warn" if running else "off")
-        self.power.setPixmap(icons.power_pixmap(running, 48))
+        self._show_identity()
+        self._set_badge("Manual" if running else "Offline", "warn" if running else "off")
+        self.power.set_state("on" if running else "off")
         self._sync_actions(False)
         self._update_tray()
         # nothing is listed until a query has read the Radmin window
@@ -445,219 +456,169 @@ class MainWindow(QMainWindow):
             self._flash("● auto-refresh OFF, Refresh to query")
 
     # ---------- layout ----------
+    def _act(self, text, slot=None, checkable=False, checked=False, tip="", shortcut=None):
+        a = QAction(text, self)
+        if checkable:
+            a.setCheckable(True); a.setChecked(bool(checked))
+        if slot is not None:
+            (a.toggled if checkable else a.triggered).connect(slot)
+        if tip:
+            a.setToolTip(tip)
+        if shortcut:
+            a.setShortcut(QKeySequence(shortcut))
+            a.setShortcutContext(Qt.WindowShortcut)
+        return a
+
     def _build(self):
+        """Radmin VPN's window: frameless title, System / Network / Help, the node
+        panel (power button, name, IP, Online badge, orange notice bar) and the
+        network panel. Linux only extras live in System > Settings."""
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         root = QWidget(); root.setObjectName("root")
         self.setCentralWidget(root)
         v = QVBoxLayout(root); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
+        v.addWidget(radui.TitleBar(self, self.close, self.showMinimized))
 
-        # menubar
+        # every action the app has; the menus show Radmin's, Settings the rest
+        self.actAuto = self._act("Auto-refresh", self._toggle_auto, True, self._auto,
+                                 "Refresh the list every few seconds")
+        self.actVmOn = self._act("Turn on" if NATIVE else "Turn VM on", self.do_vm_on)
+        self.actVmOff = self._act("Turn off" if NATIVE else "Turn VM off", self.do_vm_off)
+        self.actResetId = self._act("Reset Radmin identity…", self.do_reset_identity)
+        self.actAutostart = self._act("Start with my session (in the tray)", self._toggle_autostart,
+                                      True, autostart_enabled())
+        self.actVmOnStart = self._act("Connect when the app opens" if NATIVE else "Turn the VM on when the app opens",
+                                      lambda on: self.roster.set_setting("vm_on_start", bool(on)), True,
+                                      self.roster.get_setting("vm_on_start", False))
+        self.actNotify = self._act("Desktop notifications",
+                                   lambda on: self.roster.set_setting("notify", bool(on)), True,
+                                   self.roster.get_setting("notify", True))
+        self.actAutoUpd = self._act("Automatic updates",
+                                    lambda on: self.roster.set_setting("auto_update_check", bool(on)), True,
+                                    self.roster.get_setting("auto_update_check", True))
+        self.actOnlineOnly = self._act("Show online only", self._toggle_online_only, True,
+                                       self.roster.get_setting("online_only", False))
+        self.actConnect = self._act("Go Online", self.do_connect)
+        self.actDisconnect = self._act("Go Offline", self.do_disconnect)
+        self.actRename = self._act("Change Name", self.do_rename_inline)
+        self.actSync = self._act("Sync network members", self.discover_now)
+        self.actLeave = self._act("Leave Network", self.do_leave)
+        self.actJoin = self._act("Join Network", self.do_join, shortcut="+")
+        self.actCreate = self._act("Create Network", self.do_create, shortcut="Ins")
+        self.actGui = self._act("Open the Radmin window", self._open_vnc)
+        if NATIVE:
+            self.actForceRelay = self._act("Use relays only", self._toggle_force_relay, True, False)
+        self.actRefresh = self._act("Refresh", self.refresh_full, shortcut="F5")
+        self.addAction(self.actRefresh); self.addAction(self.actJoin); self.addAction(self.actCreate)
+
         mb = QMenuBar(); mb.setObjectName("menubar")
-        for name in ("System", "Network", "Help"):
-            m = QMenu(name, mb)
-            if name == "System":
-                a = QAction("Refresh now", self); a.triggered.connect(self.refresh_full); m.addAction(a)
-                self.actAuto = QAction("Auto-refresh", self)
-                self.actAuto.setCheckable(True); self.actAuto.setChecked(self._auto)
-                self.actAuto.setToolTip("Refresh every 15 s (one tiny request to the VM).")
-                self.actAuto.toggled.connect(self._toggle_auto); m.addAction(self.actAuto)
-                m.addSeparator()
-                self.actVmOn = QAction("Turn on" if NATIVE else "Turn VM on", self)
-                self.actVmOn.triggered.connect(self.do_vm_on); m.addAction(self.actVmOn)
-                self.actVmOff = QAction("Turn off" if NATIVE else "Turn VM off", self)
-                self.actVmOff.triggered.connect(self.do_vm_off); m.addAction(self.actVmOff)
-                m.addSeparator()
-                ah = QAction("Diagnostics" if NATIVE else "Full diagnostics (auto-repair)", self)
-                ah.triggered.connect(self.do_health); m.addAction(ah)
-                if NATIVE:
-                    ar = QAction("Retry the network interface", self)
-                    ar.setToolTip("Create the radminvpn0 interface again (asks for root once if the rule is missing)")
-                    ar.triggered.connect(self.do_retry_interface); m.addAction(ar)
-                else:
-                    au = QAction("Check for Radmin update…", self)
-                    au.triggered.connect(self.do_check_update); m.addAction(au)
-                    ao = QAction("Repair network (orchestrator)", self)
-                    ao.triggered.connect(self.do_orchestrate); m.addAction(ao)
-                    ai = QAction("Reinstall the VM agent", self)
-                    ai.triggered.connect(self.do_install_agent); m.addAction(ai)
-                m.addSeparator()
-                ar = QAction("Reset Radmin identity…", self)
-                ar.setToolTip("New node id and 26.x address, no networks")
-                self.actResetId = ar
-                ar.triggered.connect(self.do_reset_identity); m.addAction(ar)
-                m.addSeparator()
-                sm = m.addMenu("Settings")
-                self.actAutostart = QAction("Start with my session (in the tray)", self)
-                self.actAutostart.setCheckable(True); self.actAutostart.setChecked(autostart_enabled())
-                self.actAutostart.toggled.connect(self._toggle_autostart); sm.addAction(self.actAutostart)
-                self.actVmOnStart = QAction("Connect when the app opens" if NATIVE
-                                            else "Turn the VM on when the app opens", self)
-                self.actVmOnStart.setCheckable(True)
-                self.actVmOnStart.setChecked(bool(self.roster.get_setting("vm_on_start", False)))
-                self.actVmOnStart.toggled.connect(lambda on: self.roster.set_setting("vm_on_start", bool(on)))
-                sm.addAction(self.actVmOnStart)
-                self.actNotify = QAction("Notify when the connection drops", self)
-                self.actNotify.setCheckable(True)
-                self.actNotify.setChecked(bool(self.roster.get_setting("notify", True)))
-                self.actNotify.toggled.connect(lambda on: self.roster.set_setting("notify", bool(on)))
-                sm.addAction(self.actNotify)
-                self.actAutoUpd = QAction("Check for app updates automatically", self)
-                self.actAutoUpd.setCheckable(True)
-                self.actAutoUpd.setChecked(bool(self.roster.get_setting("auto_update_check", True)))
-                self.actAutoUpd.setToolTip("Once a day, one request to the GitHub releases API")
-                self.actAutoUpd.toggled.connect(lambda on: self.roster.set_setting("auto_update_check", bool(on)))
-                sm.addAction(self.actAutoUpd)
-                m.addSeparator()
-                q = QAction("Quit", self); q.triggered.connect(self._quit); m.addAction(q)
-                q.setToolTip("Disconnects and closes the app" if NATIVE
-                             else "Turns the VM off and closes the app")
-            elif name == "Network":
-                self.actOnlineOnly = QAction("Show online only", self)
-                self.actOnlineOnly.setCheckable(True)
-                self.actOnlineOnly.setChecked(bool(self.roster.get_setting("online_only", False)))
-                self.actOnlineOnly.setToolTip("Hide offline peers from the list")
-                self.actOnlineOnly.toggled.connect(self._toggle_online_only)
-                m.addAction(self.actOnlineOnly)
-                m.addSeparator()
-                self.actConnect = QAction("Connect", self)
-                self.actConnect.triggered.connect(self.do_connect); m.addAction(self.actConnect)
-                self.actDisconnect = QAction("Disconnect", self)
-                self.actDisconnect.triggered.connect(self.do_disconnect); m.addAction(self.actDisconnect)
-                m.addSeparator()
-                self.actRename = QAction("Rename this node…", self)
-                self.actRename.triggered.connect(self.do_rename_node); m.addAction(self.actRename)
-                self.actSync = QAction("Sync network members", self)
-                self.actSync.triggered.connect(self.discover_now); m.addAction(self.actSync)
-                m.addSeparator()
-                self.actLeave = QAction("Leave network…", self)
-                self.actLeave.triggered.connect(self.do_leave); m.addAction(self.actLeave)
-                self.actJoin = QAction("Join a network…", self)
-                self.actJoin.triggered.connect(self.do_join); m.addAction(self.actJoin)
-                self.actCreate = QAction("Create network…", self)
-                self.actCreate.triggered.connect(self.do_create); m.addAction(self.actCreate)
-                if NATIVE:
-                    m.addSeparator()
-                    a = QAction("Retry failed peers", self)
-                    a.setToolTip("Try again now the members that did not connect")
-                    a.triggered.connect(self.do_retry_peers); m.addAction(a)
-                    self.actForceRelay = QAction("Use relays only", self)
-                    self.actForceRelay.setCheckable(True)
-                    self.actForceRelay.setToolTip("No direct UDP/TCP, everything through Radmin relays. "
-                                                  "Reconnects; more ping. For networks where direct fails")
-                    self.actForceRelay.toggled.connect(self._toggle_force_relay); m.addAction(self.actForceRelay)
-                    a = QAction("Blocked addresses…", self)
-                    a.triggered.connect(self.do_blocked_list); m.addAction(a)
-                m.addSeparator()
-                self.actGui = QAction("Open the Radmin window", self)
-                self.actGui.triggered.connect(self._open_vnc)
-                if not NATIVE:
-                    m.addAction(self.actGui)
-            elif name == "Help":
-                a = QAction("Check for app updates…", self)
-                a.triggered.connect(lambda: self.check_app_update(manual=True)); m.addAction(a)
-                a = QAction("Open the install log", self)
-                a.triggered.connect(lambda: self._open_path(os.path.join(config.HOME, "install.log"))); m.addAction(a)
-                a = QAction("Report a problem…", self)
-                a.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(
-                    f"https://github.com/{updater.GITHUB}/issues"))); m.addAction(a)
-                m.addSeparator()
-                a = QAction("About", self); a.triggered.connect(self._about); m.addAction(a)
-            mb.addMenu(m)
-        v.addWidget(mb)
+        m = mb.addMenu("&System")
+        m.addAction(self.actRename)
+        m.addAction(self._act("Settings", self.do_settings))
+        m.addSeparator()
+        m.addAction(self._act("Exit", self._quit, tip="Disconnects and closes the app" if NATIVE
+                              else "Turns the VM off and closes the app"))
+        m = mb.addMenu("&Network")
+        m.addAction(self.actCreate)
+        m.addAction(self.actJoin)
+        m = mb.addMenu("&Help")
+        m.addAction(self._act("&Help", lambda: QDesktopServices.openUrl(QUrl(
+            f"https://github.com/{updater.GITHUB}#readme")), shortcut="F1"))
+        m.addAction(self._act("View &Log", self.do_view_log))
+        m.addSeparator()
+        m.addAction(self._act("Report a &Bug", lambda: QDesktopServices.openUrl(QUrl(
+            f"https://github.com/{updater.GITHUB}/issues/new"))))
+        m.addAction(self._act("Request a &Feature", lambda: QDesktopServices.openUrl(QUrl(
+            f"https://github.com/{updater.GITHUB}/issues/new"))))
+        m.addSeparator()
+        m.addAction(self._act("Check for &Updates…", lambda: self.check_app_update(manual=True)))
+        m.addSeparator()
+        m.addAction(self._act("&About…", self._about))
+        mbw = QWidget(); mbl = QHBoxLayout(mbw); mbl.setContentsMargins(10, 2, 10, 0)
+        mbl.addWidget(mb); mbl.addStretch(1)
+        mbw.setStyleSheet(f"background: {radui.BG};")
+        v.addWidget(mbw)
 
-        # header com logo
-        header = QWidget(); header.setObjectName("header"); header.setFixedHeight(46)
-        hl = QHBoxLayout(header); hl.setContentsMargins(12, 0, 12, 0); hl.setSpacing(8)
-        logo = QLabel(); logo.setPixmap(icons.logo_pixmap(26)); hl.addWidget(logo)
-        t = QLabel("RADMIN VPN"); t.setObjectName("logoText"); hl.addWidget(t)
-        hl.addStretch(1)
-        # declared footprint: the VM is intentionally small so it never hogs the host
-        foot = QLabel(config.vm_footprint())
-        foot.setStyleSheet("color:#6f8290; font-size:10px; font-weight:600;")
-        foot.setToolTip("Native OpenRad client, no Windows VM" if NATIVE else
-                        "The Windows VM uses only this much RAM/CPU — it won't hog your machine")
-        hl.addWidget(foot)
-        v.addWidget(header)
-
-        # card do no
-        card = QWidget(); card.setObjectName("card"); card.setFixedHeight(72)
-        cl = QHBoxLayout(card); cl.setContentsMargins(14, 8, 14, 8); cl.setSpacing(12)
-        self.power = QLabel(); self.power.setPixmap(icons.power_pixmap(False, 48))
-        self.power.setCursor(QCursor(Qt.PointingHandCursor))
-        self.power.setToolTip(f"Click to turn {'Radmin' if NATIVE else 'the VM'} on / off")
-        self.power.mousePressEvent = lambda e: self.toggle_power()
-        cl.addWidget(self.power)
-        box = QVBoxLayout(); box.setSpacing(2)
+        body = QWidget(); bl = QVBoxLayout(body); bl.setContentsMargins(10, 6, 10, 6); bl.setSpacing(8)
+        # node panel
+        top = QFrame(); top.setObjectName("topPanel")
+        tl = QVBoxLayout(top); tl.setContentsMargins(8, 8, 8, 8); tl.setSpacing(6)
+        row = QHBoxLayout(); row.setSpacing(10)
+        self.power = radui.PowerButton()
+        self.power.setToolTip("Go Online / Go Offline")
+        self.power.clicked.connect(self.toggle_power)
+        row.addWidget(self.power)
+        box = QVBoxLayout(); box.setSpacing(3)
         self.nodeName = QLabel("—"); self.nodeName.setObjectName("nodeName")
-        self.nodeName.setCursor(QCursor(Qt.PointingHandCursor))
-        self.nodeName.setToolTip("Double-click to rename this node")
-        self.nodeName.mouseDoubleClickEvent = lambda e: self.do_rename_node()
+        self.nodeName.setToolTip("Double-click to change the name")
+        self.nodeName.mouseDoubleClickEvent = lambda e: self.do_rename_inline()
+        self.nameEdit = QLineEdit(); self.nameEdit.setObjectName("nodeNameEdit"); self.nameEdit.hide()
+        self.nameEdit.returnPressed.connect(self._rename_commit)
+        self.nameEdit.editingFinished.connect(self._rename_cancel)
+        self.nameEdit.installEventFilter(self)
         self.nodeIp = QLabel("—"); self.nodeIp.setObjectName("nodeIp")
+        self.nodeIp.setTextInteractionFlags(Qt.TextSelectableByMouse)
         rowb = QHBoxLayout(); rowb.setSpacing(6)
         self.badge = QLabel("Offline"); self.badge.setObjectName("badge")
         self.badge.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         rowb.addWidget(self.badge); rowb.addStretch(1)
-        box.addWidget(self.nodeName); box.addWidget(self.nodeIp); box.addLayout(rowb)
-        cl.addLayout(box, 1)
-        v.addWidget(card)
+        box.addStretch(1)
+        box.addWidget(self.nodeName); box.addWidget(self.nameEdit); box.addWidget(self.nodeIp)
+        box.addLayout(rowb); box.addStretch(1)
+        row.addLayout(box, 1)
+        tl.addLayout(row)
+        self.status = QLabel(""); self.status.setObjectName("notice")
+        self.status.setAlignment(Qt.AlignCenter); self.status.setWordWrap(True)
+        self.status.setCursor(QCursor(Qt.PointingHandCursor))
+        self.status.mousePressEvent = lambda e: self._notice_clicked()
+        self.status.hide()
+        tl.addWidget(self.status)
+        bl.addWidget(top)
 
-        # networks toolbar (dedicated control up top): create/manage network groups.
-        # Peers are shown in collapsible per-network sections; assignment is MANUAL
-        # (right-click a peer -> Move to). Grouping is local, stored in the roster.
-        self.nettools = QWidget(); self.nettools.setObjectName("nettools")
-        ntl = QHBoxLayout(self.nettools); ntl.setContentsMargins(8, 4, 8, 4); ntl.setSpacing(6)
-        lbl = QLabel("Networks"); lbl.setStyleSheet("color:#8fa0aa; font-size:11px; font-weight:600;")
-        ntl.addWidget(lbl); ntl.addStretch(1)
-        self.addNetBtn = QPushButton("＋ Network"); self.addNetBtn.setObjectName("netAddBtn")
-        self.addNetBtn.setCursor(QCursor(Qt.PointingHandCursor))
-        self.addNetBtn.setToolTip("Create a network group, then right-click a peer to move it in")
-        self.addNetBtn.clicked.connect(self._add_group)
-        ntl.addWidget(self.addNetBtn)
-        v.addWidget(self.nettools)
-
-        # peer list
+        # network panel (sized to its content, like Radmin's)
         self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.listw = QWidget(); self.listw.setObjectName("list")
-        self.listv = QVBoxLayout(self.listw)
-        self.listv.setContentsMargins(0, 4, 0, 4); self.listv.setSpacing(0)
-        self.listv.addStretch(1)
+        outer = QVBoxLayout(self.listw); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(6)
+        self.netPanel = QFrame(); self.netPanel.setObjectName("netPanel")
+        self.listv = QVBoxLayout(self.netPanel)
+        self.listv.setContentsMargins(4, 4, 4, 6); self.listv.setSpacing(1)
+        self.listv.addStretch(0)
+        self.netPanel.hide()
+        outer.addWidget(self.netPanel)
+        self.hint = QLabel(""); self.hint.setObjectName("hint"); self.hint.setAlignment(Qt.AlignCenter)
+        self.hint.setWordWrap(True)
+        outer.addWidget(self.hint)
+        outer.addStretch(1)
         self.scroll.setWidget(self.listw)
-        v.addWidget(self.scroll, 1)
+        self.scroll.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.scroll.customContextMenuRequested.connect(
+            lambda pos: self._empty_menu(self.scroll.mapToGlobal(pos)))
+        bl.addWidget(self.scroll, 1)
+        v.addWidget(body, 1)
+        grip = QHBoxLayout(); grip.setContentsMargins(0, 0, 0, 0); grip.addStretch(1)
+        grip.addWidget(QSizeGrip(root))
+        v.addLayout(grip)
 
-        # status bar
-        self.status = QLabel("starting…"); self.status.setObjectName("status")
-        v.addWidget(self.status)
-
-        self.setStyleSheet(QSS)
+        self.setStyleSheet(radui.QSS)
         self._build_tray()
 
     def _build_tray(self):
+        """Radmin's tray menu: Open, Go Online / Go Offline, Exit."""
         self.tray = QSystemTrayIcon(icons.logo_icon(64), self)
-        self.tray.setToolTip("Radmin VPN (Linux)")
+        self.tray.setToolTip("Radmin VPN")
         menu = QMenu()
-        show = QAction("Show", self); show.triggered.connect(self._show_raise); menu.addAction(show)
+        menu.setStyleSheet(radui.QSS)
+        show = QAction("Open", self); show.triggered.connect(self._show_raise)
+        f = show.font(); f.setBold(True); show.setFont(f)
+        menu.addAction(show)
         self.trayShow = show
-        menu.addSeparator()
-        # full control from the tray — the user never touches the VM
-        self.trayPower = QAction("Turn on" if NATIVE else "Turn VM on", self)
+        self.trayPower = QAction("Go Online", self)
         self.trayPower.triggered.connect(self.toggle_power); menu.addAction(self.trayPower)
-        self.trayConn = QAction("Connect / Disconnect", self)
-        self.trayConn.triggered.connect(self._tray_toggle_conn); menu.addAction(self.trayConn)
-        if NATIVE:
-            # the power button is the connection: one item is enough
-            self.trayConn.setVisible(False)
+        self.trayConn = QAction("Connect / Disconnect", self)   # VM: Radmin service only
+        self.trayConn.triggered.connect(self._tray_toggle_conn)
         menu.addSeparator()
-        if NATIVE:
-            j = QAction("Join a network…", self); j.triggered.connect(self.do_join); menu.addAction(j)
-            d = QAction("Diagnostics", self); d.triggered.connect(self.do_health); menu.addAction(d)
-            r = QAction("Refresh", self); r.triggered.connect(self.refresh_full); menu.addAction(r)
-        else:
-            d = QAction("Full diagnostics (repair)", self); d.triggered.connect(self.do_health); menu.addAction(d)
-            u = QAction("Check for update", self); u.triggered.connect(self.do_check_update); menu.addAction(u)
-            s = QAction("Sync members", self); s.triggered.connect(self.discover_now); menu.addAction(s)
-            r = QAction("Refresh", self); r.triggered.connect(self.refresh_full); menu.addAction(r)
-            g = QAction("Open the Radmin window", self); g.triggered.connect(self._open_vnc); menu.addAction(g)
-        menu.addSeparator()
-        quit_ = QAction("Quit", self); quit_.triggered.connect(self._quit); menu.addAction(quit_)
+        quit_ = QAction("Exit", self); quit_.triggered.connect(self._quit); menu.addAction(quit_)
         quit_.setToolTip("Disconnects and closes the app" if NATIVE else "Turns the VM off and closes the app")
         self.trayQuit = quit_
         self.tray.setContextMenu(menu)
@@ -693,8 +654,7 @@ class MainWindow(QMainWindow):
             self.trayConn.setText("Disconnect" if self._last_service == "Running" else "Connect")
             self.trayConn.setEnabled(self._vm_running and not self._booting and not self._stopping)
         if hasattr(self, "trayPower"):
-            self.trayPower.setText(("Turn off" if self._vm_running else "Turn on") if NATIVE else
-                                   ("Turn VM off" if self._vm_running else "Turn VM on"))
+            self.trayPower.setText("Go Offline" if self._vm_running else "Go Online")
             self.trayPower.setEnabled(not self._stopping)
 
     def _notify(self, title, text):
@@ -790,10 +750,9 @@ class MainWindow(QMainWindow):
             self._booting = bool(st.vm_running) and not self._stopping
             if not st.vm_running:
                 self._agent_checked = False
-                self.nodeName.setText(OFF_TEXT)
-                self.nodeIp.setText("click power to turn on")
-                self._set_badge("Off", "off")
-                self.power.setPixmap(icons.power_pixmap(False, 48))
+                self._show_identity()
+                self._set_badge("Offline", "off")
+                self.power.set_state("off")
                 # no alert when it went down on request (app, tray or bench-stop.sh)
                 if was_running and not self._user_stopped and not self._busy and not was_stopping:
                     self._notify("Radmin VPN stopped", "OpenRad is no longer running." if NATIVE
@@ -802,10 +761,9 @@ class MainWindow(QMainWindow):
             elif self._stopping:
                 self._show_stopping()
             else:
-                self.nodeName.setText("Connecting…" if NATIVE else "Starting…")
-                self.nodeIp.setText(BOOT_TEXT)
+                self._show_identity(BOOT_TEXT)
                 self._set_badge("Connecting" if NATIVE else "Starting", "warn")
-                self.power.setPixmap(icons.power_pixmap(True, 48))
+                self.power.set_state("busy")
             self._set_summary(f"● {st.error}")
             self._sync_actions(False)
             self._update_tray()
@@ -839,7 +797,7 @@ class MainWindow(QMainWindow):
         if on:
             self._user_stopped = False
         self._was_online = on
-        self.power.setPixmap(icons.power_pixmap(on, 48))
+        self.power.set_state("on" if on else "off")
         self._set_badge("Online" if on else "Offline", "on" if on else "off")
         self._sync_actions(on)
 
@@ -938,8 +896,6 @@ class MainWindow(QMainWindow):
         self._layout_sig = None
         fb = mode == "fallback"
         self.actSync.setVisible(fb)   # the GUI dump only makes sense for old agents
-        self.addNetBtn.setToolTip("Create a network group, then right-click a peer to move it in"
-                                  if fb else "Join or create a Radmin network")
 
     def _peer_ips(self):
         """IPs the list shows: Radmin's members (live), the local roster
@@ -976,19 +932,18 @@ class MainWindow(QMainWindow):
         for n, w in enumerate(widgets):
             self.listv.insertWidget(n, w)
             w.show()
+        self.netPanel.setVisible(bool(widgets))
 
     def _row(self, ip, section=None):
         key = f"{section}|{ip}" if section else ip
         r = self._rows.get(key)
         if r is None:
-            r = self._rows[key] = PeerRow(ip, self._rename, self._peer_menu, key)
+            r = self._rows[key] = PeerRow(ip, self._row_double, self._peer_menu, key, self._select_row)
         label = self.roster.label_of(ip)
-        if section and section.startswith("net:"):
-            if (self._live_meta.get((section[4:], ip)) or {}).get("role") == 2:
-                label += "  ★"            # network admin
-            if ip in self._blocked:
-                label += "  (blocked)"
+        if ip in self._blocked:
+            label += "  (blocked)"
         r.set_state(label, ip in self._online, self._rtt.get(ip), self._live_via.get(ip, ""))
+        r.set_selected(key == self._sel_key)
         return r
 
     def _header(self, gid, name, count, collapsed):
@@ -1082,7 +1037,7 @@ class MainWindow(QMainWindow):
                     continue
             total += len(ms)
             collapsed = self.roster.is_collapsed(key)
-            title = net["name"] + {2: "  ★", 0: "  (waiting for approval)"}.get(net.get("role"), "")
+            title = net["name"] + ("  (waiting for approval)" if net.get("role") == 0 else "")
             widgets.append(self._header(key, title, f"{n_on}/{len(net['members'])}", collapsed))
             if collapsed:
                 continue
@@ -1123,20 +1078,47 @@ class MainWindow(QMainWindow):
 
     # ---------- status line: summary + short-lived messages ----------
     def _set_summary(self, text):
+        """The state line. Radmin has no status bar: it goes to the tray tooltip,
+        and to the hint under the list while there is nothing to list."""
         self._summary = text
-        if time.monotonic() >= self._flash_until:
-            self.status.setText(text)
+        clean = text.lstrip("● ").strip()
+        busy = self._vm_running and (self._mode is None or not self._live) and self._last_service == "Running"
+        if not self._vm_running:
+            clean = "" if (not NATIVE or orctl.identity()) else "Press the power button to create your Radmin identity"
+        self.hint.setText(clean[:1].upper() + clean[1:] if (busy or not self._vm_running) and clean else "")
+        self._show_notice()
 
     def _flash(self, text, secs=6.0):
-        """A message (action result, error) that stays readable for a few seconds
-        instead of being overwritten by the next refresh."""
-        self.status.setText(text)
+        """A short message (action result, error) in the notice bar of the node
+        panel, where Radmin shows its own notices."""
+        self._notice_text = text.lstrip("● ").strip()
         self._flash_until = time.monotonic() + secs
+        self._show_notice()
         QTimer.singleShot(int(secs * 1000) + 50, self._unflash)
 
     def _unflash(self):
-        if time.monotonic() >= self._flash_until and self._summary:
-            self.status.setText(self._summary)
+        if time.monotonic() >= self._flash_until:
+            self._show_notice()
+
+    def _show_notice(self):
+        """Orange bar: an action message for a few seconds, else the update offer."""
+        if time.monotonic() < self._flash_until and getattr(self, "_notice_text", ""):
+            t, kind = self._notice_text, "info"
+        elif self._update_offer:
+            t, kind = "Please update to the latest version", "update"
+        else:
+            self.status.hide()
+            return
+        t = t[:1].upper() + t[1:]
+        if self.status.text() != t:
+            self.status.setText(t)
+        if self.status.property("kind") != kind:
+            self.status.setProperty("kind", kind); _repolish(self.status)
+        self.status.show()
+
+    def _notice_clicked(self):
+        if self._update_offer and time.monotonic() >= self._flash_until:
+            self.check_app_update(manual=True)
 
     # ---------- network groups (manual assignment) ----------
     def _add_group(self):
@@ -1145,7 +1127,7 @@ class MainWindow(QMainWindow):
             m = QMenu(self)
             m.addAction("Join a network…", self.do_join)
             m.addAction("Create network…", self.do_create)
-            m.exec(self.addNetBtn.mapToGlobal(self.addNetBtn.rect().bottomLeft()))
+            m.exec(QCursor.pos())
             return
         text, ok = QInputDialog.getText(self, "New network", "Network name:")
         if ok and text.strip():
@@ -1167,16 +1149,22 @@ class MainWindow(QMainWindow):
         if gid.startswith("net:"):     # a real Radmin network (live list)
             name = gid[4:]
             m = QMenu(self)
-            m.addAction("Copy network name", lambda: (QGuiApplication.clipboard().setText(name),
-                                                     self._flash(f"● {name} copied")))
             if NATIVE:
-                net = self._live_net(name)
-                if net and net.get("role") == 2:
-                    m.addSeparator()
-                    m.addAction("Delete network for everyone…", lambda: self._native_delete(name))
-                m.addAction("Leave this network…", lambda: self._native_leave(name))
+                net = self._live_net(name) or {}
+                m.addAction("Leave Network", lambda: self._native_leave(name))
+                d = m.addAction("Delete Network", lambda: self._native_delete(name))
+                d.setEnabled(net.get("role") == 2)
+                if net.get("role") != 2:
+                    d.setToolTip("Only an administrator of the network can delete it")
+                m.addSeparator()
+            m.addAction("Copy Network Name", lambda: (QGuiApplication.clipboard().setText(name),
+                                                     self._flash(f"{name} copied")))
+            m.addSeparator()
+            if NATIVE:
+                m.addAction("Properties", lambda: self._net_properties(name))
             else:
                 m.addAction("Open the Radmin window", self._open_vnc)
+            m.setToolTipsVisible(True)
             m.exec(pos)
             return
         m = QMenu(self)
@@ -1202,14 +1190,21 @@ class MainWindow(QMainWindow):
 
     def _peer_menu(self, ip, pos, key=None):
         m = QMenu(self)
-        m.addAction(f"Copy IP  {ip}", lambda: (QGuiApplication.clipboard().setText(ip),
-                                              self._flash(f"● {ip} copied")))
-        m.addAction("Rename…", lambda: self._rename(ip))
+        m.addAction("Copy IP Address", lambda: (QGuiApplication.clipboard().setText(ip),
+                                               self._flash(f"{ip} copied")))
+        m.addSeparator()
+        m.addAction("Ping", lambda: self._ping_terminal(ip))
         if NATIVE and self._mode == "live":
             self._native_peer_items(m, ip, key)
-        if self._mode != "fallback":
             m.exec(pos)
             return
+        if self._mode != "fallback":
+            m.addSeparator()
+            m.addAction("Change nickname…", lambda: self._rename(ip))
+            m.exec(pos)
+            return
+        m.addSeparator()
+        m.addAction("Change nickname…", lambda: self._rename(ip))
         move = m.addMenu("Move to network")
         cur = self.roster.group_of(ip)
         for g in self.roster.groups():
@@ -1220,6 +1215,42 @@ class MainWindow(QMainWindow):
         if cur is not None:
             m.addAction("Unassign", lambda: self._move_peer(ip, None))
         m.exec(pos)
+
+    def _empty_menu(self, pos):
+        """Right click on the empty part of the list: Radmin's Create / Join."""
+        if self._mode == "fallback":
+            return self._add_group()
+        m = QMenu(self)
+        a = m.addAction("Create Network", self.do_create); a.setShortcut(QKeySequence("Ins"))
+        a = m.addAction("Join Network", self.do_join); a.setShortcut(QKeySequence("+"))
+        m.exec(pos)
+
+    def _select_row(self, key):
+        self._sel_key = key
+        for k, r in self._rows.items():
+            r.set_selected(k == key)
+
+    def _row_double(self, ip, key=None):
+        if NATIVE and self._mode == "live":
+            return self._peer_properties(ip, key)
+        self._rename(ip)
+
+    def _ping_terminal(self, ip):
+        """Radmin opens ping.exe in a console: here Konsole (or another terminal)
+        with ping, so the user sees every reply."""
+        import shutil, subprocess
+        for term, args in (("konsole", ["--hold", "-e"]), ("gnome-terminal", ["--"]),
+                           ("xfce4-terminal", ["-H", "-x"]), ("xterm", ["-hold", "-e"])):
+            if shutil.which(term):
+                try:
+                    subprocess.Popen([term, *args, "ping", ip], start_new_session=True,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                    return
+                except OSError:
+                    pass
+        self._run_action(lambda: (lambda r: (r is not None, f"{ip}: {r} ms" if r is not None else "no reply"))(
+            actions.ping_rtt([ip]).get(ip)), f"Ping {ip}")
 
     def _move_peer(self, ip, gid):
         self.roster.assign(ip, gid)
@@ -1495,7 +1526,7 @@ class MainWindow(QMainWindow):
         self.nodeName.setText("Disconnecting…" if NATIVE else "Shutting down…")
         self.nodeIp.setText("removing the network interface" if NATIVE else "VM is turning off, please wait")
         self._set_badge("Stopping", "warn")
-        self.power.setPixmap(icons.power_pixmap(True, 48))
+        self.power.set_state("busy")
 
     def _vm_action_done(self, label, ok=True):
         if self._closing:
@@ -1546,17 +1577,175 @@ class MainWindow(QMainWindow):
             self._flash(f"● Radmin up to date ({cur})")
             QMessageBox.information(self, "Update", f"Already on the latest version ({cur}).")
 
-    def do_rename_node(self):
-        from PySide6.QtWidgets import QInputDialog
+    def do_rename_node(self, new=None):
         if self._busy or not self._vm_running:
             return
         cur = self.nodeName.text()
-        new, ok = QInputDialog.getText(self, "Rename node",
-            "New name for this node (what other peers see):", text=cur)
+        ok = True
+        if new is None:
+            new, ok = QInputDialog.getText(self, "Change Name",
+                "New name for this node (what other peers see):", text=cur)
         new = (new or "").strip()
         if ok and new and new != cur:
             self._run_action(lambda: (orctl.rename(new) if NATIVE else actions.rename_node(new)),
                              "Renaming node")
+
+    # ---------- Radmin style pieces ----------
+    def _show_identity(self, ip_text=None):
+        """Radmin keeps the name and the 26.x address on screen while offline."""
+        ident = orctl.identity() if NATIVE else {}
+        self.nodeName.setText(ident.get("name") or ("Radmin VPN" if NATIVE else OFF_TEXT))
+        self.nodeIp.setText(ip_text or ident.get("ip") or ("not registered yet" if NATIVE
+                                                            else "click power to turn on"))
+
+    def do_rename_inline(self):
+        """System > Change Name: the name turns into a text box, like in Radmin."""
+        if self._busy or not self._vm_running or self._last_service != "Running":
+            self._flash("Go online first to change the name")
+            return
+        self._renaming = True
+        self.nameEdit.setText(self.nodeName.text())
+        self.nodeName.hide(); self.nameEdit.show()
+        self.nameEdit.setFocus(); self.nameEdit.selectAll()
+
+    def _rename_commit(self):
+        new = self.nameEdit.text().strip()
+        self._rename_cancel()
+        if new:
+            self.do_rename_node(new)
+
+    def _rename_cancel(self):
+        if getattr(self, "_renaming", False):
+            self._renaming = False
+            self.nameEdit.hide(); self.nodeName.show()
+
+    def eventFilter(self, obj, ev):
+        if obj is getattr(self, "nameEdit", None) and ev.type() == QEvent.KeyPress \
+                and ev.key() == Qt.Key_Escape:
+            self._rename_cancel()
+            return True
+        return super().eventFilter(obj, ev)
+
+    def do_view_log(self):
+        if NATIVE:
+            d = os.path.expanduser("~/.local/share/OpenRad/logs")
+            self._open_path(d if os.path.isdir(d) else os.path.join(config.HOME, "install.log"))
+        else:
+            self._open_path(os.path.join(config.HOME, "install.log"))
+
+    def do_settings(self):
+        """System > Settings: Radmin's General / Advanced / Notifications pages,
+        plus the Linux pieces (engine, diagnostics, identity)."""
+        def tog(act, text, tip=""):
+            w = radui.toggle_row(text, act.isChecked(), act.setChecked, tip)
+            return w
+        general = [
+            tog(self.actAutostart, "Start with my session (in the tray)"),
+            tog(self.actVmOnStart, "Go online when the app opens" if NATIVE else "Turn the VM on when the app opens"),
+            tog(self.actOnlineOnly, "Show online members only"),
+            tog(self.actAuto, "Refresh the list automatically"),
+        ]
+        adv = [tog(self.actAutoUpd, "Automatic updates", "Once a day, one request to the GitHub releases API")]
+        if NATIVE:
+            adv.append(tog(self.actForceRelay, "Use relays only",
+                           "No direct UDP/TCP, everything through Radmin relays. Reconnects; more ping"))
+            adv += [None,
+                    radui.action_button("Diagnostics", self.do_health),
+                    radui.action_button("Retry failed peers", self.do_retry_peers),
+                    radui.action_button("Retry the network interface", self.do_retry_interface,
+                                        "Create the radminvpn0 interface again"),
+                    radui.action_button("Blocked addresses…", self.do_blocked_list),
+                    radui.action_button("Reset Radmin identity…", self.do_reset_identity,
+                                        "New node id and 26.x address, no networks")]
+        else:
+            adv += [None,
+                    radui.action_button("Full diagnostics (auto-repair)", self.do_health),
+                    radui.action_button("Turn the VM on / off", self.toggle_power),
+                    radui.action_button("Open the Radmin window (VNC)", self._open_vnc),
+                    radui.action_button("Check for Radmin update…", self.do_check_update),
+                    radui.action_button("Repair network (orchestrator)", self.do_orchestrate),
+                    radui.action_button("Reinstall the VM agent", self.do_install_agent),
+                    radui.action_button("Reset Radmin identity…", self.do_reset_identity)]
+            if self._mode == "fallback":
+                adv.append(radui.action_button("Sync network members", self.discover_now))
+        notif = [tog(self.actNotify, "Desktop notifications",
+                     "When the connection drops or an update is available")]
+        dlg = radui.SettingsDialog(self, [("General", "⚙", general), ("Advanced", "☰", adv),
+                                          ("Notifications", "🔔", notif)])
+        for b in dlg.findChildren(QPushButton):
+            if b.objectName() == "flatBtn":
+                b.clicked.connect(dlg.accept)    # an action closes Settings, like a menu item
+        dlg.exec()
+
+    def _net_properties(self, name):
+        net = self._live_net(name)
+        if not net:
+            return
+        dlg = radui.RadDialog(self, f"Properties: {name}", 340)
+        f, v = radui.box("Information")
+        role = {2: "Administrator", 1: "Member", 0: "Waiting for approval"}.get(net.get("role"), "Unknown")
+        online = sum(1 for m in net["members"] if m["ip"] in self._online)
+        v.addLayout(radui.kv_grid([("Network name", name), ("Network role", role),
+                                   ("Members", f"{len(net['members']) + 1}  ({online} online)"),
+                                   ("Network ID", net.get("id") or "?")]))
+        dlg.body.addWidget(f)
+        dlg.buttons("OK", None)
+        dlg.exec()
+
+    def _peer_properties(self, ip, key):
+        netname, meta, net = self._peer_ctx(ip, key)
+        label = self.roster.label_of(ip)
+        online = ip in self._online
+        dlg = radui.RadDialog(self, f"Properties: {label}", 340)
+        f, v = radui.box("Properties")
+        v.addLayout(radui.kv_grid([("Name", label), ("ID", meta.get("rid") or "?"), ("IPv4", ip)]))
+        dlg.body.addWidget(f)
+        f, v = radui.box("Network status")
+        roleBox = QComboBox(); roleBox.addItems(["Member", "Administrator"])
+        role = meta.get("role")
+        roleBox.setCurrentIndex(1 if role == 2 else 0)
+        can = bool(net and net.get("role") == 2 and meta.get("rid") and role in (1, 2))
+        roleBox.setEnabled(can)
+        if not can:
+            roleBox.setToolTip("Only an administrator of the network can change roles")
+        v.addLayout(radui.kv_grid([("Network name", netname or "?"), ("Role", roleBox)]))
+        dlg.body.addWidget(f)
+        f, v = radui.box("Connection status")
+        via = {"udp": "UDP", "tcp": "TCP", "tcprelay": "TCP relay"}.get(self._live_via.get(ip, "").lower(), "-")
+        rtt = self._rtt.get(ip)
+        v.addLayout(radui.kv_grid([("Status", "Online" if online else "Offline"),
+                                   ("Channel type", via if online else "-"),
+                                   ("Ping", f"{rtt:.0f} ms" if online and rtt is not None else "-")]))
+        dlg.body.addWidget(f)
+        f, v = radui.box("Block traffic (Linux)")
+        blk = QComboBox(); blk.addItems(["Not blocked", "Both ways", "Only what it sends", "Only what I send"])
+        cur = {"both": 1, "incoming": 2, "outgoing": 3}.get(self._blocked.get(ip, ""), 0)
+        blk.setCurrentIndex(cur)
+        blk.setToolTip("Silent and local: the member stays connected and is not told")
+        v.addWidget(blk)
+        dlg.body.addWidget(f)
+        dlg.buttons("OK", "Cancel")
+        if dlg.exec() != QDialog.Accepted:
+            return
+        steps = []
+        if can and (roleBox.currentIndex() == 1) != (role == 2):
+            nid, rid = net["id"], meta["rid"]
+            steps.append((orctl.grant_admin if roleBox.currentIndex() == 1 else orctl.revoke_admin, (nid, rid)))
+        if blk.currentIndex() != cur:
+            if blk.currentIndex() == 0:
+                steps.append((orctl.unblock, (ip,)))
+            else:
+                if cur:
+                    steps.append((orctl.unblock, (ip,)))
+                steps.append((orctl.block, (ip, ("both", "incoming", "outgoing")[blk.currentIndex() - 1])))
+        if steps:
+            def go():
+                for fn, args in steps:
+                    ok, msg = fn(*args)
+                    if not ok:
+                        return ok, msg
+                return True, ""
+            self._run_action(go, f"Saving {label}")
 
     def do_orchestrate(self):
         self._run_action(lambda: agent.orchestrate_net(), "Repairing network")
@@ -1642,39 +1831,29 @@ class MainWindow(QMainWindow):
         if self._busy:
             return False
         if self._last_service != "Running":
-            QMessageBox.information(self, "Radmin VPN", "Turn Radmin on first (power button).")
+            QMessageBox.information(self, "Radmin VPN", "Go online first (the power button).")
             return False
         return True
 
     def _native_join(self):
         if not self._native_ready():
             return
-        name, ok = QInputDialog.getText(self, "Join a network",
-            "Network name (exactly as your friends created it, or a public network):")
-        name = (name or "").strip()
-        if not ok or not name:
+        dlg = radui.JoinNetworkDialog(self, orctl.search)
+        if dlg.exec() != QDialog.Accepted:
             return
-        pw, ok = QInputDialog.getText(self, "Join a network",
-            f"Password for {name}\n(leave empty for a public network):",
-            QLineEdit.EchoMode.Password)
-        if not ok:
-            return
-        if pw and not self._pw_ok(pw):
-            return
-        self._run_action(lambda: orctl.join(name, pw or ""), f"Joining {name}")
+        name, pw = dlg.values()
+        if name:
+            self._run_action(lambda: orctl.join(name, pw or ""), f"Joining {name}")
 
     def _native_create(self):
         if not self._native_ready():
             return
-        name, ok = QInputDialog.getText(self, "Create network", "Network name:")
-        name = (name or "").strip()
-        if not ok or not name:
+        dlg = radui.CreateNetworkDialog(self)
+        if dlg.exec() != QDialog.Accepted:
             return
-        pw, ok = QInputDialog.getText(self, "Create network",
-            f"Password for {name} (your friends need it to join):", QLineEdit.EchoMode.Password)
-        if not ok or not pw or not self._pw_ok(pw):
-            return
-        self._run_action(lambda: orctl.create(name, pw), f"Creating {name}")
+        name, pw = dlg.values()
+        if name and self._pw_ok(pw):
+            self._run_action(lambda: orctl.create(name, pw), f"Creating {name}")
 
     def _pw_ok(self, pw) -> bool:
         """Radmin network passwords are 6 to 256 characters (OpenRad checks it too)."""
@@ -1723,36 +1902,35 @@ class MainWindow(QMainWindow):
         nid = net["id"]
         self._run_action(lambda: orctl.delete(nid), f"Deleting {name}")
 
-    def _native_peer_items(self, m, ip, key):
-        """Native extras of a peer's right click menu: block, and admin tools
-        for the network of the section the row is in."""
+    def _peer_ctx(self, ip, key):
         section = key.split("|", 1)[0] if key and "|" in key else ""
         netname = section[4:] if section.startswith("net:") else ""
         meta = self._live_meta.get((netname, ip)) or {}
         net = self._live_net(netname) if netname else None
-        rid = meta.get("rid")
+        return netname, meta, net
+
+    def _native_peer_items(self, m, ip, key):
+        """Radmin's member menu, minus the Radmin Server items (remote control,
+        chat, file transfer) that OpenRad does not have."""
+        netname, meta, net = self._peer_ctx(ip, key)
+        rid, role = meta.get("rid"), meta.get("role")
         label = self.roster.label_of(ip)
+        admin = bool(net and net.get("role") == 2 and isinstance(rid, int) and rid and net.get("id"))
         m.addSeparator()
-        if isinstance(rid, int) and rid:
-            m.addAction("Ping now", lambda: self._run_action(lambda: orctl.ping(rid), f"Ping {label}"))
-        if ip in self._blocked:
-            m.addAction(f"Unblock {ip}", lambda: self._run_action(lambda: orctl.unblock(ip), f"Unblocking {ip}"))
+        rm = m.addAction("Remove", lambda: self._native_member("kick", net["id"], rid, label, netname))
+        if role == 2:
+            ga = m.addAction("Revoke Admin Rights",
+                             lambda: self._native_member("revoke", net["id"], rid, label, netname))
         else:
-            b = m.addMenu("Block this IP")
-            b.setToolTipsVisible(True)
-            for txt, d, tip in (("Both ways", "both", "Nothing goes to it and nothing it sends gets in"),
-                                ("Only what it sends", "incoming", "Ignore its packets, still send to it"),
-                                ("Only what I send", "outgoing", "Send nothing to it, still receive")):
-                a = b.addAction(txt, lambda d=d: self._run_action(lambda: orctl.block(ip, d), f"Blocking {ip}"))
-                a.setToolTip(tip)
-        if net and net.get("role") == 2 and isinstance(rid, int) and rid and net.get("id"):
-            nid, role = net["id"], meta.get("role")
-            adm = m.addMenu(f"Manage in {netname}")
-            if role == 1:
-                adm.addAction("Make admin", lambda: self._native_member("grant", nid, rid, label, netname))
-            elif role == 2:
-                adm.addAction("Remove admin", lambda: self._native_member("revoke", nid, rid, label, netname))
-            adm.addAction("Remove from the network…", lambda: self._native_member("kick", nid, rid, label, netname))
+            ga = m.addAction("Grant Admin Rights",
+                             lambda: self._native_member("grant", net["id"], rid, label, netname))
+        for a in (rm, ga):
+            a.setEnabled(admin)
+            if not admin:
+                a.setToolTip("Only an administrator of the network can do this")
+        m.setToolTipsVisible(True)
+        m.addSeparator()
+        m.addAction("Properties", lambda: self._peer_properties(ip, key))
 
     def _native_member(self, what, nid, rid, label, netname):
         if not self._native_ready():

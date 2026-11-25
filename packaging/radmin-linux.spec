@@ -1,5 +1,5 @@
 Name:           radmin-linux
-Version:        0.7.0
+Version:        0.8.0
 Release:        1%{?dist}
 Summary:        Radmin VPN on Linux (native OpenRad engine or a headless VM)
 
@@ -63,6 +63,9 @@ echo "  or RADMIN_ENGINE=vm %{_datadir}/radmin-linux/install.sh /path/to/radmin-
 echo "then launch it from the menu, or run: radmin-linux"
 
 %changelog
+* Wed Nov 25 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.8.0-1
+- Window, menus, dialogs and tray redone to look and work like Radmin VPN
+
 * Wed Nov 25 2026 gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com> - 0.7.0-1
 - Native engine: network admin (delete, kick, admins), block an IP, relays only, retry peers
 

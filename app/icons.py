@@ -56,31 +56,27 @@ def logo_icon(size: int = 64) -> QIcon:
     return QIcon(logo_pixmap(size))
 
 
-def signal_pixmap(online: bool, size: int = 18) -> QPixmap:
-    """Barras de sinal (online) ou X (offline)."""
-    pm = QPixmap(size, size)
+def signal_pixmap(online: bool, size: int = 16) -> QPixmap:
+    """Radmin's member icon: four thin rising green bars when connected; a small
+    x and grey bars when not."""
+    w, h = 20, size
+    pm = QPixmap(w, h)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     _aa(p)
-    if online:
-        p.setPen(Qt.NoPen)
-        p.setBrush(GREEN)
-        n = 4
-        bw = size / (n * 1.8)
-        gap = bw * 0.8
-        x = 1.0
-        for i in range(n):
-            h = size * (0.30 + 0.18 * i)
-            p.drawRoundedRect(QRectF(x, size - h - 1, bw, h), 1, 1)
-            x += bw + gap
-    else:
-        pen = QPen(GREY)
-        pen.setWidthF(size * 0.14)
-        pen.setCapStyle(Qt.RoundCap)
+    p.setPen(Qt.NoPen)
+    bw, gap, x0 = 2.4, 1.6, 7.0
+    base = h * 0.78
+    for i in range(4):
+        bh = h * (0.18 + 0.14 * i)
+        p.setBrush(QColor("#00ab00") if online else QColor("#59636e"))
+        p.drawRect(QRectF(x0 + i * (bw + gap), base - bh, bw, bh))
+    if not online:
+        pen = QPen(QColor("#c3cbd3")); pen.setWidthF(1.3)
         p.setPen(pen)
-        m = size * 0.28
-        p.drawLine(QPointF(m, m), QPointF(size - m, size - m))
-        p.drawLine(QPointF(size - m, m), QPointF(m, size - m))
+        c, r = QPointF(3.0, base - 2.6), 2.0
+        p.drawLine(QPointF(c.x() - r, c.y() - r), QPointF(c.x() + r, c.y() + r))
+        p.drawLine(QPointF(c.x() + r, c.y() - r), QPointF(c.x() - r, c.y() + r))
     p.end()
     return pm
 

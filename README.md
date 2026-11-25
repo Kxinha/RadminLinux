@@ -91,7 +91,9 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.7.0**: native network admin (delete a
+See [CHANGELOG.md](CHANGELOG.md). **0.8.0**: the window, menus, dialogs and tray
+look and work like Radmin VPN (power button, Join with Private and Gaming tabs,
+Create, Properties, Settings). **0.7.0**: native network admin (delete a
 network, remove members, make or remove admins), block an IP, relays only and
 retry failed peers, right in the app. **0.6.0**: native engine (OpenRad), no VM:
 the same window and tray drive it, with join, create, leave, rename and
