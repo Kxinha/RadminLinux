@@ -2245,7 +2245,7 @@ class MainWindow(QMainWindow):
                 f"Engine: OpenRad {orctl.version() or '?'} (native, no VM)\n\n"
                 "Talks to Radmin VPN networks with OpenRad, an open source\n"
                 "Radmin VPN client (MIT, github.com/gringoestrangeiro/openrad,\n"
-                "copy at github.com/gabrielmf1998/openrad).\n"
+                "with the Radmin-Linux rename fix).\n"
                 "The power button connects and creates the radminvpn0 interface.\n\n"
                 "Not affiliated with Famatech. Radmin VPN is their product.")
             return

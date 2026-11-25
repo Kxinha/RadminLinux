@@ -1,43 +1,37 @@
-# Native Linux ports of Radmin VPN (archive)
+# Native Linux ports of Radmin VPN
 
 Radmin-Linux started by running the real Radmin VPN inside a small Windows 7 VM
 (still available as the VM engine). Other people are writing **native** Linux
 clients that speak the Radmin protocol directly,
-with no VM. This page keeps a copy of those projects so the work is never lost
-and never has to start from zero.
+with no VM. This page lists those projects and what was checked in them.
 
-None of these projects are ours and none are affiliated with Famatech. Each copy
-keeps its full git history, its authors and its license. The release files are
-copied unchanged and, where upstream published sha256 digests, checked against
-them.
+None of these projects are ours and none are affiliated with Famatech.
 
 Note that the [Radmin VPN EULA](https://www.radmin-vpn.com/eula/) forbids
 reverse engineering the official client. These projects were written and
 published by their own authors; read their licenses and notes before using them.
 
-## The copies
+## The projects
 
-| Project | What it is | License | Upstream | GitHub copy | GitLab copy |
-|---|---|---|---|---|---|
-| **OpenRad** | Full Rust reimplementation: Linux TAP interface, desktop app, CLI, TCP, UDP and relay peers, Android app, self hosted server | MIT | [gringoestrangeiro/openrad](https://github.com/gringoestrangeiro/openrad) | [gabrielmf1998/openrad](https://github.com/gabrielmf1998/openrad) | [gabriel17166/openrad](https://gitlab.com/gabriel17166/openrad) |
-| radmin-linux-rs | Early Rust client, protocol research notes | MIT | [Pedrodroks34/radmin-linux-rs](https://github.com/Pedrodroks34/radmin-linux-rs) | [gabrielmf1998/radmin-linux-rs](https://github.com/gabrielmf1998/radmin-linux-rs) | [gabriel17166/radmin-linux-rs](https://gitlab.com/gabriel17166/radmin-linux-rs) |
-| radmin-vpn-linux | The official client under Wine with a custom driver and TAP bridge. The branch `marcelo1565/main` holds the Marcelo1565 fork | GPL-3.0 | [baptisterajaut/radmin-vpn-linux](https://github.com/baptisterajaut/radmin-vpn-linux) | not kept | not kept |
-| radmin-on-linux | Radmin LAN/VPN on new and old Linux versions | GPL-3.0 | [Lackind/radmin-on-linux](https://github.com/Lackind/radmin-on-linux) | [gabrielmf1998/radmin-on-linux](https://github.com/gabrielmf1998/radmin-on-linux) | [gabriel17166/radmin-on-linux](https://gitlab.com/gabriel17166/radmin-on-linux) |
-| linmin-vpn | Tray front end (Rust + Slint) for the Radmin control service | GPL-3.0 | [LinCastr/linmin-vpn](https://github.com/LinCastr/linmin-vpn) | [gabrielmf1998/linmin-vpn](https://github.com/gabrielmf1998/linmin-vpn) | [gabriel17166/linmin-vpn](https://gitlab.com/gabriel17166/linmin-vpn) |
+| Project | What it is | License | Upstream |
+|---|---|---|---|
+| **OpenRad** | Full Rust reimplementation: Linux TAP interface, desktop app, CLI, TCP, UDP and relay peers, Android app, self hosted server | MIT | [gringoestrangeiro/openrad](https://github.com/gringoestrangeiro/openrad) |
+| radmin-linux-rs | Early Rust client, protocol research notes | MIT | [Pedrodroks34/radmin-linux-rs](https://github.com/Pedrodroks34/radmin-linux-rs) |
+| radmin-vpn-linux | The official client under Wine with a custom driver and TAP bridge. The branch `marcelo1565/main` holds the Marcelo1565 fork | GPL-3.0 | [baptisterajaut/radmin-vpn-linux](https://github.com/baptisterajaut/radmin-vpn-linux) |
+| radmin-on-linux | Radmin LAN/VPN on new and old Linux versions | GPL-3.0 | [Lackind/radmin-on-linux](https://github.com/Lackind/radmin-on-linux) |
+| linmin-vpn | Tray front end (Rust + Slint) for the Radmin control service | GPL-3.0 | [LinCastr/linmin-vpn](https://github.com/LinCastr/linmin-vpn) |
 
-Every upstream release is copied to the **Releases** page of both copies, with a
-note on top linking the original release. Copied on 2026-11-24 (OpenRad up to
-v2.4.5).
-GitLab release uploads stop near 100 MB, so the AppImage above that size
-(radmin-on-linux v0.1.0) is in its GitLab copy's
-**Package Registry** and linked from the release.
+The GitHub and GitLab copies made on 2026-11-24 were removed on 2026-11-25 to
+keep the profile clean. Use the upstream links above. The OpenRad build that
+Radmin-Linux installs lives in the Radmin-Linux releases, see
+[`packaging/openrad`](../packaging/openrad/README.md).
 
 `RhuanXDK/radmin-vpn-linux-rs`, an older fork of radmin-linux-rs, was already
-deleted upstream and could not be copied.
+deleted upstream.
 
 ## OpenRad review (v2.4.5, 2026-11-24)
 
-What was checked before copying, without running anything on the real network:
+What was checked before using it, without running anything on the real network:
 
 * **Network.** The client only talks to the Radmin bootstrap server
   `148.113.190.78:17301` (in `src/config.rs`, overridable with `--host`), to the
@@ -78,10 +72,10 @@ server.
 ## OpenRad as the Radmin-Linux native engine (0.6.0)
 
 Since 0.6.0 Radmin-Linux uses OpenRad as its default engine (see the README).
-The installer takes the `openrad` binary from the official release copied to
-[gabrielmf1998/openrad](https://github.com/gabrielmf1998/openrad/releases)
-(GitLab copy as fallback), version and sha256 pinned in
-[`OPENRAD_VERSION`](../OPENRAD_VERSION), and installs it root owned in
+The installer takes the `openrad` binary from a Radmin-Linux release (GitHub,
+GitLab as fallback). Since 0.9.2 that is OpenRad 2.4.5 plus the rename fix in
+[`packaging/openrad`](../packaging/openrad/README.md). Version, sha256 and the
+release that holds it are pinned in [`OPENRAD_VERSION`](../OPENRAD_VERSION), and installs it root owned in
 `/usr/local/lib/radmin-linux/openrad`. Root ownership matters: the polkit rule
 (`packaging/polkit/`) lets the user run only that path with `tap-helper` as the
 first argument, so the user cannot swap the binary that runs as root.
@@ -92,14 +86,15 @@ admins may use them), `block`/`unblock` (stored in the profile preferences and
 read back from `status`), `force-relay` and `retry-peers`. Not exposed yet:
 `broadcast-peer`, `server`, `interface-name`.
 
-To move to a newer OpenRad: mirror its release (section below), check what
-changed in `tap-helper`, put the new tag and the sha256 of
-`openrad-<tag>-linux-x86_64.tar.gz` in `OPENRAD_VERSION`, test, release.
+To move to a newer OpenRad: check whether upstream already has the rename fix,
+check what changed in `tap-helper`, build the tarball as in `packaging/openrad`,
+attach it to a Radmin-Linux release, put tag, sha256 and release in
+`OPENRAD_VERSION`, test, release.
 
-## Rebuilding OpenRad from the copy
+## Rebuilding OpenRad
 
 ```bash
-git clone https://github.com/gabrielmf1998/openrad.git   # or the GitLab copy
+git clone https://github.com/gringoestrangeiro/openrad.git
 cd openrad && git checkout v2.4.5
 cargo fetch --locked
 cargo build --release --locked --offline --workspace
@@ -108,12 +103,3 @@ cargo build --release --locked --offline --workspace
 
 OpenRad and the Radmin-Linux VM both use the 26.0.0.0/8 range, so run only one
 of them at a time.
-
-## Updating the copies
-
-The script used is
-[`tools/mirror-releases.py`](../tools/mirror-releases.py). For each project,
-fetch the upstream branches and tags into a `git clone --mirror`, push
-`refs/heads/*` and `refs/tags/*` to both copies, then run
-`tools/mirror-releases.py <upstream owner/repo> <name>`. It skips releases that
-were already copied.

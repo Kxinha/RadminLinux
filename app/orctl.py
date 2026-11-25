@@ -8,8 +8,8 @@ create, leave, rename, diagnostics). Everything goes through the `openrad` CLI
 with --json; the CLI talks to the per-user OpenRad service over its private
 Unix socket, so each call takes a few ms.
 
-OpenRad: https://github.com/gabrielmf1998/openrad (copy of
-github.com/gringoestrangeiro/openrad, MIT). Not affiliated with Famatech.
+OpenRad: https://github.com/gringoestrangeiro/openrad (MIT), built with the
+patch in packaging/openrad. Not affiliated with Famatech.
 """
 from __future__ import annotations
 import json, os, shutil, subprocess, tempfile, time

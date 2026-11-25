@@ -3,7 +3,7 @@
 Radmin VPN only exists for Windows. This project gives you a native Linux window
 and tray icon for the Radmin network (26.x.x.x), with two engines behind it:
 
-* **Native (default since 0.6.0)**: [OpenRad](https://github.com/gabrielmf1998/openrad),
+* **Native (default since 0.6.0)**: [OpenRad](https://github.com/gringoestrangeiro/openrad),
   an open source (MIT) Radmin VPN client written in Rust by
   [gringoestrangeiro](https://github.com/gringoestrangeiro/openrad). No VM, no
   Windows, about 6 MB. It creates a `radminvpn0` network interface with your
@@ -116,7 +116,8 @@ the network password.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md). **0.9.1**: the app opens again from the menu with
+See [CHANGELOG.md](CHANGELOG.md). **0.9.2**: changing your name now reaches the
+other members, Windows users included (OpenRad 2.4.5-rl.1). **0.9.1**: the app opens again from the menu with
 the native engine (the launcher asked for the VM link). **0.9.0**: verified against official Radmin
 VPN on Windows; System > Firewall Exceptions (Allow All Apps, Add Application)
 so Windows friends can join a server you host on Linux; Create and Join buttons

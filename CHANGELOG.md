@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.2 (2026-11-25)
+
+### Fix
+* Changing your name did not reach the other members: Windows users kept
+  seeing the old name. OpenRad only saved the name locally, but the Radmin
+  server ignores the name sent at login. Official Radmin renames with its own
+  server command (operation 52, action 10), and the server then pushes the new
+  name to every member (record 0x132d). OpenRad now does both: a rename while
+  connected is sent at once, a rename while offline is sent on the next
+  connect, and names changed by other members update live.
+* Tested against the official Radmin server with two identities: the other
+  side saw the new name, live updates arrived in about 4 seconds without
+  reconnecting, and an offline rename was delivered on connect.
+
+### OpenRad build
+* The installer now uses OpenRad 2.4.5-rl.1: upstream 2.4.5 plus the rename
+  fix. The binary ships as an asset of this release (GitHub and GitLab), the
+  patch is in `packaging/openrad/`. Built on Debian 11 (glibc 2.30) so it runs
+  on Ubuntu 20.04, Debian 11 and newer.
+
 ## 0.9.1 (2026-11-25)
 
 ### Fix
@@ -96,7 +116,7 @@ Native engine (OpenRad): what the official Radmin window did, now in the app.
 ## 0.6.0 (2026-11-25)
 
 ### Native engine: no VM
-* New default engine: [OpenRad](https://github.com/gabrielmf1998/openrad)
+* New default engine: [OpenRad](https://github.com/gringoestrangeiro/openrad)
   (copy of gringoestrangeiro/openrad, MIT), a native Radmin VPN client. The
   same window and tray drive it through `app/orctl.py`, which runs
   `openrad <command> --json` against the per user OpenRad service.

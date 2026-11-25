@@ -1,0 +1,403 @@
+From 34b4702b06e0f3fe43ee37897a3a9f4afed06cd2 Mon Sep 17 00:00:00 2001
+From: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 05:39:29 -0300
+Subject: [PATCH 1/2] Port Radmin ChangeAlias (operation 52 action 10) and
+ apply 0x132d name updates
+
+Renaming a device now reaches other members. Online renames are sent
+immediately; offline renames are queued and sent on the next connect.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ locales/messages.json       | 15 +++++++
+ src/daemon.rs               | 71 +++++++++++++++++++++++++++----
+ src/main.rs                 |  4 +-
+ src/network.rs              | 15 +++++++
+ src/protocol.rs             | 10 +++++
+ tests/network_management.rs | 84 +++++++++++++++++++++++++++++++++++++
+ 6 files changed, 190 insertions(+), 9 deletions(-)
+
+diff --git a/locales/messages.json b/locales/messages.json
+index 3a3ba6d..6459560 100644
+--- a/locales/messages.json
++++ b/locales/messages.json
+@@ -4943,5 +4943,20 @@
+     "Fonte de aleatoriedade do sistema indisponível",
+     "Системный источник случайных чисел недоступен",
+     "Nguồn dữ liệu ngẫu nhiên của hệ thống không khả dụng"
++  ],
++  "Device name changed": [
++    "Nome do dispositivo alterado",
++    "Имя устройства изменено",
++    "Đã đổi tên thiết bị"
++  ],
++  "Device name changed to {name}": [
++    "Nome do dispositivo alterado para {name}",
++    "Имя устройства изменено на {name}",
++    "Đã đổi tên thiết bị thành {name}"
++  ],
++  "Device name saved. It is sent to the server when the service connects.": [
++    "Nome do dispositivo salvo. Ele será enviado ao servidor quando o serviço conectar.",
++    "Имя устройства сохранено. Оно будет отправлено на сервер при подключении службы.",
++    "Đã lưu tên thiết bị. Tên sẽ được gửi lên máy chủ khi dịch vụ kết nối."
+   ]
+ }
+diff --git a/src/daemon.rs b/src/daemon.rs
+index 6139958..752f7b9 100644
+--- a/src/daemon.rs
++++ b/src/daemon.rs
+@@ -215,6 +215,19 @@ impl DataDir {
+     /// server keeps its own identity slot. The official server uses the
+     /// profile root (unchanged from earlier releases); a custom server uses
+     /// `servers/HOST-PORT`, with the same file or credential-store storage.
++    /// Marker for a rename saved while no service ran: the next session must
++    /// still announce the name to the server (operation 52 action 10).
++    pub fn alias_pending_path(&self) -> PathBuf {
++        self.identity_root().join("alias-pending")
++    }
++    pub fn set_alias_pending(&self, pending: bool) {
++        let path = self.alias_pending_path();
++        if pending {
++            let _ = std::fs::write(&path, b"1");
++        } else {
++            let _ = std::fs::remove_file(&path);
++        }
++    }
+     pub fn identity_root(&self) -> PathBuf {
+         match self.server() {
+             None => self.path.clone(),
+@@ -727,6 +740,7 @@ impl Request {
+                         MemberAction::RevokeAdmin => MemberActionWire::RevokeAdmin,
+                     },
+                 },
++                NetworkRequest::Alias { name } => Self::Rename { node_name: name },
+             },
+             Command::Tagged { .. } | Command::Timed { .. } => bail!("unsupported control command"),
+         })
+@@ -1340,6 +1354,10 @@ struct State {
+     sender: Option<SyncSender<Command>>,
+     session_stop: Option<Arc<AtomicBool>>,
+     pending: BTreeMap<u64, Sender<Reply>>,
++    /// A rename saved while offline still has to reach the server: the login
++    /// name does not change the name other members see, only operation 52
++    /// action 10 (Radmin's CChangeAlias) does.
++    alias_pending: bool,
+ }
+ struct Shared {
+     state: Mutex<State>,
+@@ -1373,6 +1391,7 @@ impl Shared {
+                 sender: None,
+                 session_stop: None,
+                 pending: BTreeMap::new(),
++                alias_pending: false,
+             }),
+             changed: Condvar::new(),
+             config: Mutex::new(()),
+@@ -1457,6 +1476,20 @@ impl Shared {
+                 state.phase = "connected";
+                 state.error = None;
+                 state.snapshot = Some(Arc::new(snapshot));
++                if state.alias_pending {
++                    let name = state.identity.as_ref().map(|i| i.node_name.clone());
++                    if let (Some(name), Some(sender)) = (name, state.sender.clone()) {
++                        if sender
++                            .try_send(Command::Network(NetworkRequest::Alias { name }))
++                            .is_ok()
++                        {
++                            state.alias_pending = false;
++                            if let Some(dir) = &self.directory {
++                                dir.set_alias_pending(false);
++                            }
++                        }
++                    }
++                }
+             }
+             Update::CommandResult {
+                 id,
+@@ -1842,6 +1875,17 @@ impl Shared {
+             Request::BlockList => block_reply(&self.lock_state().preferences.blocked),
+             Request::Rename { node_name } => {
+                 crate::protocol::validate_node_name(&node_name)?;
++                // Online: ask the server first, like Radmin does. Other members
++                // only see the new name after this succeeds.
++                let online = self.lock_state().phase == "connected";
++                if online {
++                    let reply = self.command(Command::Network(NetworkRequest::Alias {
++                        name: node_name.clone(),
++                    }));
++                    if !reply.ok {
++                        return Ok(reply);
++                    }
++                }
+                 let _serial = self.lock_config();
+                 let mut identity = self
+                     .lock_state()
+@@ -1856,15 +1900,23 @@ impl Shared {
+                     .save_identity(&identity)?;
+                 let mut state = self.lock_state();
+                 state.identity = Some(identity);
+-                state.restart = !state.identity_replaced;
+-                self.changed.notify_all();
+-                if let Some(stop) = &state.session_stop {
+-                    stop.store(true, Ordering::Relaxed);
++                if online {
++                    if let Some(dir) = &self.directory {
++                        dir.set_alias_pending(false);
++                    }
++                    Reply::ok("Device name changed", Value::Null)
++                } else {
++                    state.alias_pending = true;
++                    state.restart = !state.identity_replaced;
++                    self.changed.notify_all();
++                    if let Some(stop) = &state.session_stop {
++                        stop.store(true, Ordering::Relaxed);
++                    }
++                    Reply::ok(
++                        "Device name saved. It is sent to the server when the service connects.",
++                        Value::Null,
++                    )
+                 }
+-                Reply::ok(
+-                    "Device name saved. Reconnecting with the same identity…",
+-                    Value::Null,
+-                )
+             }
+             Request::Configure { preferences } => {
+                 let _serial = self.lock_config();
+@@ -1985,6 +2037,9 @@ fn supervisor(
+         else {
+             break;
+         };
++        if dir.alias_pending_path().exists() {
++            shared.lock_state().alias_pending = true;
++        }
+         let shared_updates = shared.clone();
+         // One guard: two `lock_state()` temporaries in one expression would deadlock.
+         let (broadcast_policy, block_policy) = {
+diff --git a/src/main.rs b/src/main.rs
+index b4b3893..1e1f048 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -678,9 +678,11 @@ fn run_command(cli: Cli) -> Result<daemon::Reply> {
+                 let mut identity = dir.load_identity()?;
+                 identity.node_name = node_name;
+                 dir.save_identity(&identity)?;
++                // Other members see it only after the service announces it.
++                dir.set_alias_pending(true);
+                 daemon::Reply {
+                     ok: true,
+-                    message: "Device name saved".into(),
++                    message: "Device name saved. It is sent to the server when the service connects.".into(),
+                     data: Value::Null,
+                 }
+             }
+diff --git a/src/network.rs b/src/network.rs
+index 96a7375..03bd8e6 100644
+--- a/src/network.rs
++++ b/src/network.rs
+@@ -99,6 +99,11 @@ pub enum NetworkRequest {
+         member: u64,
+         action: MemberAction,
+     },
++    /// Change this device's name on the server (Radmin `CChangeAlias`,
++    /// operation 52 action 10). Peers see it through member updates.
++    Alias {
++        name: String,
++    },
+ }
+ impl NetworkRequest {
+     pub fn public_join(name: String) -> Self {
+@@ -219,6 +224,7 @@ enum Purpose {
+     Leave(String),
+     Delete(String),
+     Member(String, u64, MemberAction),
++    Alias(String),
+ }
+ struct JoinAuth {
+     sh: ShClient,
+@@ -308,6 +314,11 @@ impl NetworkOperation {
+                 )?;
+                 (Purpose::Member(network, member, action), bytes)
+             }
++            NetworkRequest::Alias { name } => {
++                crate::protocol::validate_node_name(&name)?;
++                let bytes = management(10, id, sequence, textv(0x03000304, &name)?)?;
++                (Purpose::Alias(name), bytes)
++            }
+         };
+         Ok((
+             Self {
+@@ -328,6 +339,7 @@ impl NetworkOperation {
+             Purpose::Leave(_) => 3,
+             Purpose::Delete(_) => 7,
+             Purpose::Member(_, _, a) => a.code(),
++            Purpose::Alias(_) => 10,
+         }
+     }
+     pub(crate) fn is_join(&self) -> bool {
+@@ -436,6 +448,9 @@ impl NetworkOperation {
+                 ));
+             }
+             match &self.purpose {
++                Purpose::Alias(name) => {
++                    return Ok(Progress::done(format!("Device name changed to {name}"), false));
++                }
+                 Purpose::Join(name) => {
+                     ensure!(
+                         self.auth.as_ref().is_none_or(|a| a.step == 8),
+diff --git a/src/protocol.rs b/src/protocol.rs
+index a2a170b..f778eba 100644
+--- a/src/protocol.rs
++++ b/src/protocol.rs
+@@ -909,6 +909,16 @@ impl Membership {
+                 self.read_role(&f, rid)?;
+             }
+         }
++        // A member changed its device name (Radmin's CChangeAlias, operation
++        // 52 action 10): 0x132d carries its RID and the new name.
++        for r in entries.iter().filter(|r| r.tag == 0x132d) {
++            let f = records(r.value)?;
++            let rid = int64(field(&f, 0x020001e1)?)?;
++            let name = display_text(field(&f, 0x03000304)?)?;
++            if let Some(peer) = self.peers.get_mut(&rid) {
++                peer.name = name;
++            }
++        }
+         for r in entries.iter().filter(|r| r.tag == 0x1323) {
+             self.read_network(r.value)?;
+         }
+diff --git a/tests/network_management.rs b/tests/network_management.rs
+index 35e3daf..69e17dc 100644
+--- a/tests/network_management.rs
++++ b/tests/network_management.rs
+@@ -637,3 +637,87 @@ fn delete_is_correlated_and_only_removes_the_target_network() {
+         [OTHER.into()].into_iter().collect()
+     );
+ }
++
++#[test]
++fn change_alias_uses_operation_52_action_10_and_peers_apply_0x132d() {
++    // Request: the device name alone, like Radmin's CChangeAlias.
++    let (mut operation, bytes) = NetworkOperation::start(
++        NetworkRequest::Alias {
++            name: "New device name".into(),
++        },
++        101,
++        7,
++    )
++    .unwrap();
++    let expected = [
++        u32v(CLIENT_OP, 52),
++        tlv(
++            0x1319,
++            &[
++                u32v(0x0100030c, 10),
++                u64v(0x02000340, 101),
++                u32v(0x0100034a, 7),
++                textv(0x03000304, "New device name").unwrap(),
++            ]
++            .concat(),
++        ),
++    ]
++    .concat();
++    assert_eq!(bytes, expected);
++    assert!(NetworkOperation::start(NetworkRequest::Alias { name: " ".into() }, 101, 7).is_err());
++
++    // Server acknowledgement completes it; a refusal is reported.
++    let mut membership = Membership::default();
++    let done = operation
++        .handle(&response(10, 101, Some(7), &[]), &mut membership)
++        .unwrap();
++    assert!(!done.complete.unwrap().error);
++    let (mut refused, _) =
++        NetworkOperation::start(NetworkRequest::Alias { name: "Other".into() }, 102, 8).unwrap();
++    let done = refused
++        .handle(&response(10, 102, Some(8), &u32v(0x010001d2, 5)), &mut membership)
++        .unwrap();
++    assert!(done.complete.unwrap().error);
++
++    // Live update other members receive: op 41, 0x131f { 0x132d { RID, name } }.
++    membership.peers.insert(
++        MEMBER,
++        Peer {
++            rid: MEMBER,
++            name: "Old name".into(),
++            vip: Ipv4Addr::new(26, 1, 2, 3),
++            server: None,
++            state: 1,
++            network_ids: [GUID.to_string()].into(),
++        },
++    );
++    let change = packet(
++        41,
++        0x131f,
++        &[
++            u32v(0x010003a6, 1),
++            tlv(
++                0x132d,
++                &[
++                    u64v(0x020001e1, MEMBER),
++                    textv(0x03000304, "Renamed member").unwrap(),
++                ]
++                .concat(),
++            ),
++        ]
++        .concat(),
++    );
++    membership.changes(&change).unwrap();
++    assert_eq!(membership.peers[&MEMBER].name, "Renamed member");
++    // Unknown members are ignored rather than invented.
++    let unknown = packet(
++        41,
++        0x131f,
++        &tlv(
++            0x132d,
++            &[u64v(0x020001e1, 7), textv(0x03000304, "Nobody").unwrap()].concat(),
++        ),
++    );
++    membership.changes(&unknown).unwrap();
++    assert!(!membership.peers.contains_key(&7));
++}
+-- 
+2.56.1
+
+
+From c322e272651510cddfe727ca438ec9e0399c3d47 Mon Sep 17 00:00:00 2001
+From: gabrielmf1998 <110578985+gabrielmf1998@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 05:43:05 -0300
+Subject: [PATCH 2/2] Version 2.4.5-rl.1 for the Radmin-Linux build
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.lock | 2 +-
+ Cargo.toml | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index dffa6d6..2e9c1b6 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2557,7 +2557,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+ 
+ [[package]]
+ name = "openrad-client"
+-version = "2.4.5"
++version = "2.4.5-rl.1"
+ dependencies = [
+  "aes 0.8.4",
+  "anyhow",
+diff --git a/Cargo.toml b/Cargo.toml
+index dfe33f9..2fe8d63 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "openrad-client"
+-version = "2.4.5"
++version = "2.4.5-rl.1"
+ edition = "2021"
+ rust-version = "1.95"
+ license = "MIT"
+-- 
+2.56.1
+

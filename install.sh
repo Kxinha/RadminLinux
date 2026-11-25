@@ -37,8 +37,9 @@ OR_DIR="/usr/local/lib/radmin-linux"
 OR_BIN="$OR_DIR/openrad"
 OR_RULE="/etc/polkit-1/rules.d/49-radmin-linux-openrad-$USER.rules"   # one rule per user
 OR_COPY="$OR_DIR/polkit-$USER.rules"                         # readable copy of OR_RULE
-OR_GH="https://github.com/gabrielmf1998/openrad/releases/download"
-OR_GL="https://gitlab.com/gabriel17166/openrad/-/releases"
+# OpenRad build shipped as an asset of a Radmin-Linux release (3rd field of OPENRAD_VERSION)
+OR_GH="https://github.com/gabrielmf1998/Radmin-Linux/releases/download"
+OR_GL="https://gitlab.com/gabriel17166/radmin-linux/-/releases"
 
 mkdir -p "$HOME_DIR"
 LOG="$HOME_DIR/install.log"
@@ -125,7 +126,8 @@ fi
 # native: fetch OpenRad (pinned version + sha256 in OPENRAD_VERSION) and add
 # the root owned copy and the polkit rule to the same single pkexec prompt
 if [[ $NATIVE == 1 ]]; then
-  read -r OR_TAG OR_SUM < "$SELF/OPENRAD_VERSION" || die "OPENRAD_VERSION missing"
+  read -r OR_TAG OR_SUM OR_REL < "$SELF/OPENRAD_VERSION" || die "OPENRAD_VERSION missing"
+  [[ -n "$OR_REL" ]] || die "OPENRAD_VERSION has no release tag"
   OR_TAR="openrad-$OR_TAG-linux-x86_64.tar.gz"
   [[ "$(uname -m)" == x86_64 ]] || die "OpenRad is built for x86_64 only (use RADMIN_ENGINE=vm)"
   have=""; [[ -x "$OR_BIN" ]] && have="$("$OR_BIN" --version 2>/dev/null | awk '{print $NF}')"
@@ -133,8 +135,8 @@ if [[ $NATIVE == 1 ]]; then
     command -v curl >/dev/null || die "curl is needed to download OpenRad"
     TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
     say "   downloading OpenRad $OR_TAG…"
-    curl -fsSL --retry 3 -o "$TMPD/$OR_TAR" "$OR_GH/$OR_TAG/$OR_TAR" \
-      || curl -fsSL --retry 3 -o "$TMPD/$OR_TAR" "$OR_GL/$OR_TAG/downloads/$OR_TAR" \
+    curl -fsSL --retry 3 -o "$TMPD/$OR_TAR" "$OR_GH/$OR_REL/$OR_TAR" \
+      || curl -fsSL --retry 3 -o "$TMPD/$OR_TAR" "$OR_GL/$OR_REL/downloads/$OR_TAR" \
       || die "could not download OpenRad from GitHub or GitLab"
     echo "$OR_SUM  $TMPD/$OR_TAR" | sha256sum -c --quiet - || die "OpenRad download does not match the pinned sha256"
     tar -xzf "$TMPD/$OR_TAR" -C "$TMPD" "openrad-$OR_TAG-linux-x86_64/openrad" "openrad-$OR_TAG-linux-x86_64/LICENSE" \
